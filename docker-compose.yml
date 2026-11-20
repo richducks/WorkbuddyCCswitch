@@ -1,0 +1,32 @@
+services:
+  workbuddy-hermes:
+    build:
+      context: .
+      args:
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+    image: workbuddy-hermes-stack:local
+    container_name: workbuddy-hermes
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      GW_PORT: "8317"
+      HOST_GW_PORT: "${HOST_GW_PORT:-8317}"
+      BRIDGE_PORT: "8318"
+      WEB_PORT: "8080"
+      HOST_WEB_PORT: "${HOST_WEB_PORT:-8080}"
+      HOST_BRIDGE_PORT: "${HOST_BRIDGE_PORT:-8318}"
+      LOGIN_TIMEOUT: "300"
+    ports:
+      - "127.0.0.1:${HOST_WEB_PORT:-8080}:8080"
+      - "127.0.0.1:${HOST_GW_PORT:-8317}:8317"
+      - "127.0.0.1:${HOST_BRIDGE_PORT:-8318}:8318"
+    volumes:
+      - ./data/gateway:/data/gateway
+      - ./data/web:/data/web
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import base64,json,urllib.request; t=open('/data/web/web.token').read().strip(); h={'Authorization':('Bas'+'ic ')+base64.b64encode(('admin:'+t).encode()).decode()}; d=json.load(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/api/summary',headers=h),timeout=5)); assert d.get('gatewayAlive')"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s

@@ -1,0 +1,10 @@
+.git
+data
+backup
+__pycache__
+*.pyc
+*.log
+.env
+README.md
+scripts/selftest.py
+.DS_Store

@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hermes 模型接入控制台</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel-2: #1c2330;
+    --fg: #e6edf3; --muted: #8b949e; --border: #30363d;
+    --accent: #58a6ff; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+         font-size: 14px; line-height: 1.55; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 24px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: .3px; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .meta { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px;
+          font-size: 12px; color: var(--muted); background: var(--panel); }
+  .pill.live { color: var(--ok); border-color: rgba(63,185,80,.4); }
+  .pill.off { color: var(--bad); border-color: rgba(248,81,73,.4); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
+  .card.wide { grid-column: 1 / -1; }
+  .card h2 { margin: 0 0 14px; font-size: 15px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+  .card h2 .n { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 8px 10px; font-size: 13px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+  code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; font-size: 12px; }
+  pre { background: #0b0f14; border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+        overflow: auto; font-size: 12px; line-height: 1.35; white-space: pre; color: #c9d1d9; }
+  button { font: inherit; font-size: 13px; padding: 7px 13px; border-radius: 7px; cursor: pointer;
+           color: var(--fg); background: var(--panel-2); border: 1px solid var(--border); transition: .15s; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: rgba(88,166,255,.12); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  button.sm { padding: 4px 9px; font-size: 12px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  .spacer { flex: 1; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
+       border-bottom: 1px solid var(--border); padding: 8px 10px; white-space: nowrap; }
+  td { border-bottom: 1px solid var(--border); padding: 11px 10px; vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  .file { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); }
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600;
+           padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+  .badge.ok { color: var(--ok); background: rgba(63,185,80,.12); }
+  .badge.warn { color: var(--warn); background: rgba(210,153,34,.12); }
+  .badge.bad { color: var(--bad); background: rgba(248,81,73,.12); }
+  .badge.mute { color: var(--muted); background: rgba(139,148,158,.10); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .quota { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; }
+  .toast { position: fixed; right: 20px; bottom: 20px; max-width: 420px; z-index: 50;
+           background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+           border-radius: 8px; padding: 12px 16px; box-shadow: 0 12px 30px rgba(0,0,0,.4); display: none; }
+  .toast.err { border-left-color: var(--bad); }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: none;
+              align-items: center; justify-content: center; z-index: 40; padding: 20px; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+           padding: 22px; width: min(620px, 100%); max-height: 88vh; overflow: auto; }
+  .modal h3 { margin: 0 0 6px; font-size: 17px; }
+  .modal .steps { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
+  .modal a { color: var(--accent); word-break: break-all; }
+  .step-num { display: inline-block; width: 18px; height: 18px; line-height: 18px; text-align: center;
+              border-radius: 50%; background: rgba(88,166,255,.15); color: var(--accent); font-size: 11px; margin-right: 5px; }
+  .empty { color: var(--muted); text-align: center; padding: 22px; }
+  .loading { opacity: .5; pointer-events: none; }
+  .provider-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 12px; margin-top: 12px; }
+  .provider-form[hidden] { display: none; }
+  .provider-form label { display: grid; gap: 4px; align-content: start; color: var(--muted); font-size: 12px; }
+  .provider-form input, .provider-form select, .provider-form textarea { width: 100%; min-width: 0; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--fg); background: #0b0f14; font: inherit; }
+  .provider-row { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+  .provider-form .full { grid-column: 1 / -1; }
+  .provider-form .bar { margin: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Hermes <span>模型接入</span>控制台</h1>
+      <div class="sub">模型提供商 · WorkBuddy 微信账号与签到 · CC Switch 用量桥</div>
+    </div>
+    <div class="meta">
+      <span class="pill" id="clock">--</span>
+      <span class="pill" id="gwPill">网关检测中…</span>
+      <span class="pill" id="verPill">--</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card wide" id="providersCard">
+      <h2>模型提供商</h2>
+      <div class="provider-row"><strong>WorkBuddy Gateway</strong> <span class="file">内置 · 账号与签到见下方</span></div>
+      <div id="providerList"><p class="hint">正在读取自定义提供商…</p></div>
+      <div class="bar"><button class="primary" type="button" id="addProviderBtn" disabled>＋ 添加提供商</button><button type="button" id="refreshProvidersBtn">刷新列表</button></div>
+      <p class="hint">保存后复制配置命令，到运行 Hermes 的宿主机执行。API Key 不填在这里；若需要鉴权，只填写环境变量名。保存或移除预设不会修改 Hermes 的默认模型或备用链。</p>
+      <form class="provider-form" id="providerForm" hidden>
+        <label>标识<input name="id" required maxlength="31" pattern="[a-z][a-z0-9\-]{0,30}" placeholder="my-relay" autocomplete="off"></label>
+        <label>显示名称<input name="name" required maxlength="64" placeholder="我的中转" autocomplete="off"></label>
+        <label>API Base URL<input name="url" required type="url" maxlength="500" placeholder="https://api.example.com/v1" autocomplete="off"></label>
+        <label>API 协议<select name="transport"><option value="chat_completions">OpenAI Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option><option value="codex_responses">Responses</option></select></label>
+        <label>默认模型 ID<input name="defaultModel" required maxlength="200" placeholder="provider/model" autocomplete="off"></label>
+        <label>密钥环境变量（可选）<input name="keyEnv" maxlength="100" pattern="[A-Z_][A-Z0-9_]{0,99}" placeholder="MY_RELAY_API_KEY" autocomplete="off"></label>
+        <label class="full">额外模型 ID（每行一个）<textarea name="models" rows="3" maxlength="20099"></textarea></label>
+        <div class="bar full"><button class="primary" type="submit" id="saveProviderBtn">保存提供商</button><button type="button" id="cancelProviderBtn">取消</button></div>
+        <p class="hint full" id="providerError" role="status" hidden></p>
+      </form>
+    </section>
+    <section class="card wide" id="acctCard">
+      <h2>WorkBuddy 微信账号池 <span class="n" id="acctCount"></span></h2>
+      <table>
+        <thead><tr>
+          <th>账号</th><th>来源 / 状态</th><th>额度（积分）</th><th>今日签到</th><th>操作</th>
+        </tr></thead>
+        <tbody id="acctBody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+      </table>
+      <div class="bar">
+        <button class="primary" id="addBtn">＋ 添加微信账号</button>
+        <button class="primary" id="checkinAllBtn" disabled>一键签到</button>
+        <span class="spacer"></span>
+        <button id="refreshBtn">刷新</button>
+      </div>
+      <div class="bar">
+        <label><input type="checkbox" id="autoCheckinEnabled" disabled> 自动签到</label>
+        <span class="file" id="autoCheckinState" aria-live="polite"></span>
+      </div>
+      <div class="hint">北京时间：自动签到在 08:00–09:30 随机发起，失败在 09:30–10:00 按计划重试。具体计划和实际尝试时间见每个账号。关闭自动签到不影响手动操作。</div>
+      <div class="hint" id="batchCheckinResults" aria-live="polite" style="white-space:pre-wrap" hidden></div>
+    </section>
+
+    <section class="card">
+      <h2>WorkBuddy · Hermes 对接</h2>
+      <div class="kv">
+        <div class="k">端点</div><div class="v" id="hEndpoint">--</div>
+        <div class="k">默认模型</div><div class="v" id="hModel">--</div>
+        <div class="k">API Key</div><div class="v" id="hKey">--</div>
+      </div>
+      <div class="bar">
+        <button class="sm" id="copyProviderBtn">复制 provider JSON</button>
+        <button class="sm" id="copyCmdBtn">复制配置命令</button>
+        <button class="sm" id="copyKeyBtn">复制完整 Key</button>
+      </div>
+      <pre id="providerJson" style="margin-top:12px">--</pre>
+      <div class="hint">
+        在<b>宿主机</b>执行上面的命令，并把 API Key 写入 <code>~/.hermes/.env</code>
+        的 <code>WORKBUDDY_GATEWAY_API_KEY</code>（用 Hermes 的安全写入方式）。
+        容器内端口映射到宿主 <code>127.0.0.1</code>，不对局域网开放。
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>WorkBuddy 模型目录 <span class="n" id="modelCount"></span></h2>
+      <div class="kv">
+        <div class="k">可用模型</div><div class="v" id="modelIds">--</div>
+        <div class="k">默认模型</div><div class="v" id="modelDefault">hy3</div>
+      </div>
+      <div class="bar">
+        <button class="sm" id="copyRefreshBtn">复制模型刷新命令</button>
+      </div>
+      <div class="hint">
+        目录来自网关 <code>/v1/models</code>，网关新增模型后自动更新（最长 5 分钟缓存）。
+        上面复制的 provider JSON / 配置命令已包含全部模型；要立即更新宿主机现有 Hermes 配置，在宿主机执行：
+        <code>cd ~/Documents/CodexProjects/WorkbuddyCCswitch &amp;&amp; python3 scripts/refresh-hermes-models.py</code>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>用量桥 / CC Switch</h2>
+      <div class="kv">
+        <div class="k">桥地址</div><div class="v" id="bridgeUrl">--</div>
+        <div class="k">用途</div><div class="v">CC Switch 分账号额度与签到状态</div>
+        <div class="k">鉴权</div><div class="v">独立 Bearer token（不对外分享）</div>
+      </div>
+      <div class="hint">
+        在 CC Switch 的 Hermes 卡片 →「更多 → 配置用量查询」→ 自定义：
+        Base URL 填桥地址，查询专用 API Key 填桥 token。
+        查询脚本：<code>GET {{baseUrl}}/usage</code>，提取器返回 <code>response.entries</code>。
+        用量刷新只读，不会触发签到。
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h3>添加微信账号</h3>
+    <div class="steps">新账号写入独立凭据文件，网关热加载后自动加入账号池。</div>
+    <div id="loginArea">
+      <div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div>
+      <div class="empty">点击上方按钮开始。二维码与登录链接只会显示在本地页面。</div>
+    </div>
+    <div class="bar" style="margin-top:18px; justify-content:flex-end">
+      <button id="closeModalBtn">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let summary = null;
+let pollTimer = null;
+let checkinBusy = false;
+let autoSettingsBusy = false;
+
+function toast(msg, err=false) {
+  const t = $('#toast');
+  t.textContent = msg; t.className = 'toast' + (err ? ' err' : '');
+  t.style.display = 'block';
+  clearTimeout(t._timer); t._timer = setTimeout(() => t.style.display = 'none', 5200);
+}
+async function api(path, opts={}) {
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || (`HTTP ${r.status}`));
+  return data;
+}
+function post(path, body) {
+  return api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+}
+function esc(s) { const d=document.createElement('div'); d.textContent=s==null?'':String(s); return d.innerHTML; }
+function fmtTime(v) {
+  if (!v) return '—';
+  const d = new Date(v < 1e12 ? v * 1000 : v);  // 兼容秒 / 毫秒时间戳
+  return d.toLocaleString('zh-CN', {hour12:false, timeZone:'Asia/Shanghai'});
+}
+function badge(status, label) {
+  let cls = 'mute';
+  if (status === 'success') cls = 'ok';
+  else if (status === 'failed') cls = 'bad';
+  else if (['pending','running'].includes(status)) cls = 'warn';
+  else if (status === 'missed') cls = 'bad';
+  return `<span class="badge ${cls}"><span class="dot"></span>${esc(label)}</span>`;
+}
+
+function render(d) {
+  summary = d;
+  $('#clock').textContent = d.now;
+  const gp = $('#gwPill');
+  gp.textContent = d.gatewayAlive ? '网关运行中' : '网关未运行';
+  gp.className = 'pill ' + (d.gatewayAlive ? 'live' : 'off');
+  $('#verPill').textContent = d.version;
+  $('#acctCount').textContent = `共 ${d.accounts.length} 个`;
+
+  const body = $('#acctBody');
+  if (!d.accounts.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">尚无账号，点击「添加微信账号」扫码接入。</td></tr>';
+  } else {
+    body.innerHTML = d.accounts.map((a) => {
+      const q = a.quota;
+      const quota = q && q.known
+        ? `<span class="quota">${esc(q.remaining)} / ${esc(q.total)}</span>`
+        : '<span class="empty" style="padding:0">—</span>';
+      const source = `${esc(a.edition || '未加载')} · ${esc(a.state || (a.loaded ? '?' : '未加载'))}`;
+      const c = a.checkin;
+      const extra = c.attempts ? ` · ${esc(c.attempts)} 次` : '';
+      const chk = badge(c.status, c.label + extra);
+      const label = esc(a.label);
+      return `<tr>
+        <td><div>${label}</div><div class="file">${esc(a.file)}</div></td>
+        <td><div>${source}</div><div class="file">${a.loaded ? '已加载' : '文件存在，待热加载'}</div></td>
+        <td>${quota}</td>
+        <td>${chk}
+          ${d.autoCheckinEnabled && c.nextAt ? `<div class="file" style="margin-top:3px">计划${c.status === 'failed' ? '重试' : '签到'}：${fmtTime(c.nextAt)}</div>` : ''}
+          ${c.lastAt ? `<div class="file" style="margin-top:3px">${c.status === 'success' ? '签到时间' : '最近尝试'}：${fmtTime(c.lastAt)}</div>` : ''}
+        </td>
+        <td style="white-space:nowrap">
+          <button class="sm manualCheckinBtn" data-file="${esc(a.file)}" ${a.manualEligible && !checkinBusy?'':'disabled'} title="${a.manualEligible?'立即签到，无需重启网关':'当前状态不可手动签到'}">${c.status === 'missed' ? '补签' : '手动签到'}</button>
+          <button class="sm danger renameBtn" data-file="${esc(a.file)}" data-label="${label}">改名</button>
+          <button class="sm danger removeBtn" data-file="${esc(a.file)}">移除</button>
+        </td></tr>`;
+    }).join('');
+  }
+
+  const h = d.hermes;
+  $('#hEndpoint').textContent = h.endpoint;
+  $('#hModel').textContent = h.model;
+  $('#hKey').textContent = h.hasKey ? h.keyMasked : '未生成';
+  $('#providerJson').textContent = JSON.stringify(h.providerEntry, null, 2);
+  $('#bridgeUrl').textContent = `http://127.0.0.1:${d.bridgePort}/usage`;
+  const models = d.modelCatalog || [];
+  $('#modelCount').textContent = `共 ${models.length} 个`;
+  $('#modelIds').textContent = models.length
+    ? models.slice(0, 12).map(m => m.id).join(', ') + (models.length > 12 ? ` … 等 ${models.length} 个` : '')
+    : '—';
+  $('#modelDefault').textContent = h.model;
+
+  document.querySelectorAll('.manualCheckinBtn').forEach(b => b.onclick = () => doManualCheckin(b.dataset.file));
+  document.querySelectorAll('.renameBtn').forEach(b => b.onclick = () => {
+    const next = prompt('新的显示名称（仅本地备注，不含账号标识）：', b.dataset.label);
+    if (next && next.trim()) post('/api/labels', {file:b.dataset.file, label:next.trim()}).then(load).catch(e=>toast(e.message,true));
+  });
+  document.querySelectorAll('.removeBtn').forEach(b => b.onclick = () => {
+    if (!confirm(`确认将 ${b.dataset.file} 移出账号池？凭据会移到私有 .disabled 目录，不会删除。`)) return;
+    post('/api/accounts/remove', {file:b.dataset.file}).then(()=>{toast('已移出账号池，等待热加载');load();}).catch(e=>toast(e.message,true));
+  });
+  const signable = d.accounts.filter(a => a.manualEligible).length;
+  $('#checkinAllBtn').disabled = checkinBusy || !signable;
+  $('#checkinAllBtn').textContent = checkinBusy ? '签到中…' : `一键签到${signable ? `（${signable}）` : ''}`;
+  $('#autoCheckinEnabled').checked = d.autoCheckinEnabled === true;
+  $('#autoCheckinEnabled').disabled = autoSettingsBusy;
+  $('#autoCheckinState').textContent = autoSettingsBusy ? '保存中…' : (d.autoCheckinEnabled ? '已开启' : '已关闭');
+}
+
+async function load() {
+  try { render(await api('/api/summary')); }
+  catch (e) { toast('加载失败：' + e.message, true); }
+}
+
+async function doBatchCheckin() {
+  if (checkinBusy || !summary?.accounts.some(a => a.manualEligible)) return;
+  checkinBusy = true;
+  render(summary);
+  const report = $('#batchCheckinResults');
+  report.hidden = false;
+  report.textContent = '正在逐个签到，已签到或已尝试账号会跳过…';
+  try {
+    const {results} = await post('/api/checkin/all');
+    const lines = Object.entries(results).map(([file, result]) => {
+      const name = summary.accounts.find(a => a.file === file)?.label || file;
+      return `${name}：${result}`;
+    });
+    report.textContent = lines.join('\n') || '没有符合条件的账号';
+  } catch (e) { report.textContent = '签到请求未确认：' + e.message; }
+  finally { checkinBusy = false; await load(); }
+}
+
+async function saveAutoCheckin(enabled) {
+  if (autoSettingsBusy || !summary) return;
+  autoSettingsBusy = true;
+  render(summary);
+  try {
+    const saved = await post('/api/checkin/settings', {enabled});
+    summary.autoCheckinEnabled = saved.enabled;
+    toast(saved.enabled ? '已开启自动签到' : '已关闭自动签到，手动签到仍可用');
+  } catch (e) { toast('保存失败：' + e.message, true); }
+  finally { autoSettingsBusy = false; render(summary); await load(); }
+}
+
+async function doManualCheckin(file) {
+  if (checkinBusy) return;
+  checkinBusy = true;
+  render(summary);
+  toast('正在手动签到…');
+  try {
+    const r = await post('/api/checkin/manual', {file});
+    toast(`${file}：${r.result}`, r.result !== '已签到');
+  } catch (e) { toast(e.message, true); }
+  finally { checkinBusy = false; await load(); }
+}
+
+async function copy(text, tip) {
+  try { await navigator.clipboard.writeText(text); toast(tip); }
+  catch (e) { toast('复制失败，请手动选择文本', true); }
+}
+
+$('#addBtn').onclick = () => { $('#modalBg').style.display = 'flex'; $('#loginArea').innerHTML =
+  '<div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div><div class="empty">点击上方按钮开始。二维码与登录链接只会显示在本地页面。</div>';
+  $('#startLoginBtn').onclick = startLogin; };
+$('#closeModalBtn').onclick = () => { if (pollTimer) clearInterval(pollTimer); $('#modalBg').style.display = 'none'; };
+$('#modalBg').onclick = (e) => { if (e.target === $('#modalBg')) $('#closeModalBtn').click(); };
+$('#refreshBtn').onclick = load;
+$('#checkinAllBtn').onclick = doBatchCheckin;
+$('#autoCheckinEnabled').onchange = e => saveAutoCheckin(e.target.checked);
+$('#copyProviderBtn').onclick = () => copy(JSON.stringify(summary.hermes.providerEntry, null, 2), 'provider JSON 已复制');
+$('#copyCmdBtn').onclick = () => copy(summary.hermes.configCommand, '配置命令已复制');
+$('#copyKeyBtn').onclick = async () => { try { copy((await api('/api/hermes/key')).apiKey, '完整 Key 已复制'); } catch(e){toast(e.message,true);} };
+$('#copyRefreshBtn').onclick = () => copy(
+  'cd ~/Documents/CodexProjects/WorkbuddyCCswitch && python3 scripts/refresh-hermes-models.py',
+  '模型刷新命令已复制');
+
+async function startLogin() {
+  const btn = $('#startLoginBtn'); btn.disabled = true; btn.textContent = '正在生成…';
+  try {
+    const s = await post('/api/accounts');
+    $('#loginArea').innerHTML = `<div class="steps"><span class="step-num">1</span>用<b>目标微信号</b>扫描下方二维码</div>
+      <pre id="qrBox">正在生成二维码…</pre>
+      <div class="steps" style="margin-top:8px"><span class="step-num">2</span>如无法扫码，打开：<a id="loginLink" href="#" target="_blank" rel="noopener">—</a></div>
+      <div class="bar"><button id="cancelLoginBtn" class="danger">取消</button><span class="spacer"></span><span class="file" id="loginFile">${esc(s.file)}</span></div>`;
+    $('#cancelLoginBtn').onclick = () => post('/api/session/cancel', {sessionId:s.sessionId}).then(()=>{clearInterval(pollTimer);toast('已取消');load();});
+    const poll = async () => {
+      try {
+        const v = await api('/api/session?id=' + encodeURIComponent(s.sessionId));
+        const box = $('#qrBox'); if (box) box.textContent = v.output || '正在生成二维码…';
+        const link = $('#loginLink'); if (link && v.loginUrl) { link.href = v.loginUrl; link.textContent = v.loginUrl; }
+        if (v.status === 'done') {
+          clearInterval(pollTimer);
+          toast(v.credentialCreated ? '登录完成，账号已写入凭据文件' : '登录进程结束，未检测到新凭据', !v.credentialCreated);
+          load();
+        }
+      } catch (e) { clearInterval(pollTimer); toast('登录状态查询失败：' + e.message, true); }
+    };
+    poll(); pollTimer = setInterval(poll, 1500);
+  } catch (e) { toast('无法开始登录：' + e.message, true); btn.disabled = false; btn.textContent = '生成登录二维码'; }
+}
+
+load();
+setInterval(load, 15000);
+</script>
+<script src="/providers.js"></script>
+</body>
+</html>

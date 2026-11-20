@@ -1,0 +1,142 @@
+# Hermes 模型接入控制台（Docker）
+
+把现有的「WorkBuddy Gateway 多微信号池 + Hermes 自定义 provider + CC Switch 分账号用量」方案打包成一个 Docker 镜像，
+并提供本地配置网页：管理 WorkBuddy 微信账号与签到，或新增独立的 Hermes 模型提供商预设。
+
+## 范围
+
+- **容器内**：基于 WorkBuddy Gateway v1.14.47 固定源码构建的本地版本、只读用量桥、配置网页。手动签到只通过容器内私有 Unix 套接字调用，不增加宿主机端口。
+- **宿主机**：可保留现有 Hermes / CC Switch，按实际地址和各自的凭据接入，不需要把 Hermes 一起部署进容器。
+- **网络**：所有 Docker 端口仅发布到 `127.0.0.1`；远程访问可通过 SSH 本地端口转发，不直接发布管理网页。
+
+## 结构
+
+```
+┌─ container: workbuddy-hermes ─────────────────────────────┐
+│  docker-entrypoint.sh  (修正卷属主 → 降权到 wb 用户)      │
+│  boot.py                                                  │
+│    ├─ workbuddy-gateway serve   0.0.0.0:8317  (API)        │
+│    ├─ usage_bridge              0.0.0.0:8318  (/usage)     │
+│    └─ web console               0.0.0.0:8080  (配置网页)   │
+│  /data/gateway  ← ./data/gateway  (凭据/config/签到状态/日志)│
+│  /data/web      ← ./data/web      (token/标签/登录二维码)   │
+└──────────────────────────────────────────────────────────┘
+          │ 127.0.0.1 端口映射
+          └─ Hermes (providers.workbuddy) / CC Switch (用量查询)
+```
+
+## 快速开始
+
+需要 Linux x86_64、Docker Compose、Git 和 Go 1.26.5（或兼容的较新 Go 工具链）。仓库不包含编译后的网关；构建脚本会拉取固定的 WorkBuddy Gateway v1.14.47 源码、校验提交并应用本地补丁。
+
+```bash
+cd WorkbuddyCCswitch
+cp -n .env.example .env
+# 按需调整 .env 中的 UID/GID 和宿主机端口。
+bash scripts/build-manual-gateway.sh
+docker compose up -d --build
+docker compose ps
+```
+
+默认管理网页为 `http://127.0.0.1:8080/`，用户名 `admin`。首次启动生成的网页登录密码保存在私有文件 `data/web/web.token`；网关 API Key 和 CC Switch 用量 token 是另外两份凭据。
+
+如果 Docker 部署在远程服务器上，下面的命令在运行 Hermes 的电脑上执行（替换 SSH 用户及主机名，端口按服务器 `.env` 调整）：
+
+```bash
+ssh -NT -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:8317:127.0.0.1:8317 \
+  -L 127.0.0.1:18080:127.0.0.1:8080 \
+  deploy@server.example.com
+```
+
+隧道连通后，在本地浏览器打开 `http://127.0.0.1:18080/`，使用控制台给出的 WorkBuddy 配置在本地 Hermes 接入 `http://127.0.0.1:8317/v1`。如有端口冲突，调整相应的本地转发端口及 Hermes 的 Base URL。不需要将 Docker 的业务端口开放到公网。
+
+## 网页功能
+
+| 区域 | 内容 |
+|---|---|
+| 模型提供商 | WorkBuddy 作为内置项；其他服务可新增、编辑、移除接入预设，并导出命名的 Hermes 配置命令 |
+| 微信账号池 | 逐号显示凭据文件名、可自定义备注、加载状态、额度、今日签到徽章（已签到 / 未签到 / 签到失败 / 待签到）、最近签到时间 |
+| 添加微信账号 | 点击后容器执行 `login -auth workbuddyN.json`，网页实时显示终端二维码和备用登录链接；本人用目标微信号扫码授权，凭据写入独立文件，网关热加载自动加入账号池 |
+| 一键签到 / 单号签到 | 处理尚未尝试的待签或漏签国内个人账号；批量逐个执行并显示各账号结果。跳过已签到、已尝试或正在签到的账号；无需重启网关。 |
+| 自动签到 | 网页开关默认开启，保存后立即生效并在容器重启后保留。关闭只暂停尚未开始的自动尝试，不影响手动签到。每个账号显示当天的计划签到或重试时间，以及最近实际尝试时间（北京时间）。 |
+| 改名 / 移除 | 备注只存本地标签文件；移除是把凭据移到 `data/gateway/.disabled/`，不删除文件 |
+| Hermes 对接 | 显示 `base_url`、默认模型、脱敏 API Key；可复制 provider JSON、配置命令和完整 Key |
+| 模型目录 | 自动从网关 `/v1/models` 读取全部模型（含上下文/输出上限）；复制的 provider JSON 已含全量模型；新增模型后可一键复制刷新命令同步到宿主机 Hermes |
+| 用量桥 | 显示 CC Switch 应填写的 Base URL；用量刷新只读，不触发签到 |
+
+## 备份与迁移
+
+`data/gateway/` 和 `data/web/` 包含真实凭据和运行状态，不能上传到 Git。跨服务器迁移时，停掉旧实例后通过可信的私有通道复制这两个目录，跳过日志和 Unix 套接字；不要使用同一批账号同时运行两套实例。
+
+```bash
+bash scripts/backup-current.sh      # 本机私有备份，不上传 Git
+```
+
+`scripts/rollback.sh` 仅适用于原本就运行了旧版 systemd 网关和用量桥的机器，不是新安装的通用回滚方式。
+
+WorkBuddy 本身的模型目录在网关更新后刷新。若宿主机 Hermes 配置也要同步 WorkBuddy 的新模型：
+
+```bash
+python3 scripts/refresh-hermes-models.py   # 只改 providers.workbuddy.models，自动备份；随后重启 CC Switch
+```
+
+
+## 接入非 WorkBuddy 提供商
+
+1. 在「模型提供商」点击「添加提供商」，填名称、标识、API Base URL、协议和默认模型 ID。模型列表手动填写，可选附加模型；支持 Chat Completions、Anthropic Messages 和 Responses。
+2. 若需要鉴权，只填独立的密钥变量名，把实际密钥单独写入目标 Hermes profile 的凭据环境。不要把密钥填进 URL、预设或命令。带密钥的非本机端点必须使用 HTTPS。
+3. 保存后复制配置命令，在运行 Hermes 的宿主机执行。命令只写 `providers.wbx-<标识>`；然后通过 `hermes model` 选择，不会自动切换默认模型或调整现有备用链。导入同一标识会更新该条配置；移除网页预设不会删除已导入 Hermes 的条目。
+
+预设保存在 `data/web/providers.json`，由 Docker 数据卷持久化。控制台不请求这些自定义地址，也不代理推理；API 地址应由 **Hermes 所在宿主机** 可达。宿主机运行 Hermes 时，本机 Ollama 的 OpenAI 兼容地址可填 `http://127.0.0.1:11434/v1`，模型填写已安装的对话模型 ID。OAuth 提供商仍用 Hermes 原生授权；第三方提供商不参与 WorkBuddy 签到和额度统计。
+
+## 签到说明
+
+- 国内个人账号由网关按北京时间自动签到：08:00–09:30 随机发起，失败在 09:30–10:00 重试。
+- Docker 本地版本的「手动签到」复用上游签到执行器和状态锁，先记录尝试再发请求，不重复签到；失败沿用网关原有重试计划。
+- 「补签」与「手动签到」均经同一个本地签到执行器，不清零已用尝试次数；启动补签已排队且自动签到开启时，等待原队列执行。接近北京时间午夜不发起跨日请求。
+- 关闭自动签到后，已发出的请求不会被取消；重新开启不会改写已有计划。主机休眠期间不会执行自动签到。
+
+## 验证
+
+```bash
+python3 -B scripts/selftest.py          # 不触碰真实账号
+python3 -B scripts/test_providers.py    # 自定义提供商持久化、校验与命令导出
+docker compose config --quiet
+docker compose ps
+curl -i http://127.0.0.1:8080/api/summary  # 默认端口，未认证应返回 401
+curl -i http://127.0.0.1:8318/usage        # 默认端口，未认证应返回 401
+```
+
+## 安全约定
+
+- 数据卷 `0700`，凭据/状态/token 文件 `0600`；进程降权运行。
+- 网页 Basic Auth + 同源校验；API Key 只在 `/api/hermes/key` 返回给已认证会话，页面上默认脱敏。
+- 不输出 UID、昵称、令牌或原始日志到网页；日志中不记录二维码内容。
+- 容器内监听 `0.0.0.0` 是 Docker NAT 的必要条件；宿主机只发布到 `127.0.0.1`。不要改成 `0.0.0.0` 发布。
+- 只接入本人或明确获授权的微信账号。
+
+## 限制
+
+- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，使用 Go 1.26.5 运行 `bash scripts/build-manual-gateway.sh`。脚本验证上游提交并运行签到测试；升级前必须重新核对上游 `checkin.go` 与状态文件。
+- 扫码必须由账号本人在网页显示的二维码/链接上完成，无法自动化。
+- 账号池按可用性调度，网页展示分账号信息不代表可在单次请求中固定使用某个账号。
+- 二维码登录进程最多等待 `LOGIN_TIMEOUT`（默认 300 秒），超时自动终止。
+
+## 文件
+
+```
+Dockerfile              镜像定义（python:3.11-slim + gosu 降权）
+docker-compose.yml      端口映射与数据卷
+docker-entrypoint.sh    卷属主修正 + 降权
+bin/workbuddy-gateway-manual   本地生成，不纳入 Git
+gateway-overlay/               手动签到补丁和调度器测试
+config/config.json.example  网关配置模板（首次启动生成密钥）
+app/boot.py             启动编排
+app/controller.py       账号/登录会话/标签/Hermes 信息
+app/checkin.py          补签排队与终态轮询
+app/usage_bridge.py     CC Switch 只读用量桥
+app/web.py              网页与 API
+app/static/index.html   配置网页
+scripts/                下载校验、离线自测、备份、回滚、模型列表刷新
+```

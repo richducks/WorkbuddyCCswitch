@@ -1,0 +1,2 @@
+# Preserve the required context-line whitespace of this upstream patch.
+/gateway-overlay/scheduler.patch -whitespace

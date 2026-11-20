@@ -1,0 +1,15 @@
+/.env
+/.env.*
+!/.env.example
+/.last-backup
+/data/
+/backup/
+/bin/
+__pycache__/
+*.py[cod]
+*.log
+*.sock
+*.token
+*.sqlite*
+*.db
+.DS_Store
