@@ -27,16 +27,22 @@
 
 ## 快速开始
 
-需要 Linux x86_64、Docker Compose、Git 和 Go 1.26.5（或兼容的较新 Go 工具链）。仓库不包含编译后的网关；构建脚本会拉取固定的 WorkBuddy Gateway v1.14.47 源码、校验提交并应用本地补丁。
+支持 Linux、macOS 和 Windows，三平台运行同一个 Docker 栈（容器内行为完全一致）。宿主机需要：Docker（Linux 用 Docker Engine + compose 插件；macOS / Windows 用 Docker Desktop，Windows 需启用 WSL2 后端）、Git、Python 3.9+，以及 Go 1.26+（构建网关用；无系统 Go 时用 `--go` 或环境变量 `GO` 指定）。Apple Silicon 原生构建 arm64 容器，Intel/AMD 为 amd64。
+
+仓库不包含编译后的网关；构建脚本会拉取固定的 WorkBuddy Gateway v1.14.47 源码、校验提交、应用本地补丁并运行签到测试。
 
 ```bash
 cd WorkbuddyCCswitch
-cp -n .env.example .env
+cp -n .env.example .env                    # Windows PowerShell: Copy-Item .env.example .env
 # 按需调整 .env 中的 UID/GID 和宿主机端口。
-bash scripts/build-manual-gateway.sh
+python3 scripts/build_gateway.py           # Windows: python scripts\build_gateway.py
 docker compose up -d --build
 docker compose ps
 ```
+
+更省事的路径：直接用跨平台的部署脚本 `python3 skill/scripts/deploy_workbuddy_ccswitch.py deploy --dir ./WorkbuddyCCswitch`（克隆、构建、启动、健康检查一条命令完成），Windows 上把 `python3` 换成 `python`。
+
+`scripts/backup-current.sh` 与 `scripts/rollback.sh` 是 bash 脚本（备份、回滚 systemd 旧方案），仅 Linux/macOS 可直接运行，Windows 用户请在 WSL2 中执行或手动复制 `data/`。
 
 默认管理网页为 `http://127.0.0.1:8080/`，用户名 `admin`。首次启动生成的网页登录密码保存在私有文件 `data/web/web.token`；网关 API Key 和 CC Switch 用量 token 是另外两份凭据。
 
@@ -128,7 +134,7 @@ curl -i http://127.0.0.1:8318/usage        # 默认端口，未认证应返回 4
 
 ## 限制
 
-- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，使用 Go 1.26.5 运行 `bash scripts/build-manual-gateway.sh`。脚本验证上游提交并运行签到测试；升级前必须重新核对上游 `checkin.go` 与状态文件。
+- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，运行 `python3 scripts/build_gateway.py`（Go 1.26+，`--goarch amd64|arm64` 可覆盖目标架构，默认跟随本机）。脚本验证上游提交并运行签到测试；升级前必须重新核对上游 `checkin.go` 与状态文件。
 - 扫码必须由账号本人在网页显示的二维码/链接上完成，无法自动化。
 - 账号池按可用性调度，网页展示分账号信息不代表可在单次请求中固定使用某个账号。
 - 二维码登录进程最多等待 `LOGIN_TIMEOUT`（默认 300 秒），超时自动终止。
@@ -148,5 +154,5 @@ app/checkin.py          补签排队与终态轮询
 app/usage_bridge.py     CC Switch 只读用量桥
 app/web.py              网页与 API
 app/static/index.html   配置网页
-scripts/                下载校验、离线自测、备份、回滚、模型列表刷新
+scripts/                跨平台网关构建、离线自测、备份、回滚、模型列表刷新
 ```

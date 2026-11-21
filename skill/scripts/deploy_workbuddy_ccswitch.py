@@ -21,7 +21,6 @@ from urllib.request import urlopen
 
 REPO = "https://github.com/richducks/WorkbuddyCCswitch.git"
 BRANCH = "main"
-CONTAINER = "workbuddy-hermes"
 
 
 def fail(msg: str) -> NoReturn:
@@ -63,16 +62,6 @@ def port_free(local_port: int) -> bool:
         return False
 
 
-def container_running(name: str) -> bool:
-    try:
-        out = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Running}}", name],
-            capture_output=True, text=True, timeout=15)
-        return out.stdout.strip() == "true"
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
 def require_ports_free(repo_dir: Path) -> None:
     keys = ("HOST_WEB_PORT", "HOST_GW_PORT", "HOST_BRIDGE_PORT")
     taken = [k for k in keys if not port_free(int(env_value(repo_dir, k)))]
@@ -99,7 +88,7 @@ def cmd_deploy(args) -> None:
         fail("构建网关需要 Go 1.26+ 工具链；请先安装 Go，或用 GO=/path/to/go 指定")
     if not (repo_dir / "bin/workbuddy-gateway-manual").exists():
         print("Building pinned gateway binary (first run downloads upstream source)")
-        sh(["bash", "scripts/build-manual-gateway.sh"], cwd=repo_dir, timeout=1800)
+        sh([sys.executable, "scripts/build_gateway.py"], cwd=repo_dir, timeout=1800)
     if not (repo_dir / ".env").exists():
         shutil.copy(repo_dir / ".env.example", repo_dir / ".env")
         print("已从 .env.example 生成 .env；如需修改 UID/GID 或端口请先编辑")
@@ -158,7 +147,7 @@ def cmd_tunnel(args) -> None:
     print(f"隧道映射：本地 :{args.port} → 服务器网关 API，:{args.port + 100} → 服务器网页")
     print(f"Hermes Base URL: http://127.0.0.1:{args.port}/v1")
     try:
-        os.execvp("ssh", cmd)
+        subprocess.run(cmd)
     except OSError as e:
         fail(f"无法启动 ssh：{e}")
 

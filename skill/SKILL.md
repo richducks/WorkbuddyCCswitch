@@ -13,14 +13,16 @@ metadata:
 
 ## 适用场景
 
-- 在一台 Linux x86_64 主机（本地或服务器）全新部署本项目，或把已有部署更新到 main 最新。
+- 在 Linux、macOS 或 Windows（本地或服务器）全新部署本项目，或把已有部署更新到 main 最新。
 - 已有部署的健康检查，以及「服务器跑 Docker、本地跑 Hermes」的隧道对接。
-- 不适用于：上游 WorkBuddy Gateway 的开发修改；非 Docker 部署；ARM64（网关二进制按 amd64 构建，ARM 需在目标机自行构建）。
+- 不适用于：上游 WorkBuddy Gateway 的开发修改；无 Docker 的裸机部署。
 
 ## 前置条件
 
-- Linux x86_64，Docker Engine（含 compose 插件）、git；构建网关需要 Go 1.26+（无系统 Go 时用 `GO=/path/to/go/bin/go` 指定）。
-- 仓库当前为私有：执行机需具备 GitHub 访问权限（`gh auth login`、部署用 token 或 SSH key）。仓库转公开后此限制消失。
+- Docker：Linux 用 Docker Engine + compose 插件；macOS / Windows 用 Docker Desktop（Windows 需 WSL2 后端）。
+- Git、Python 3.9+（Windows 命令用 `python` 代替 `python3`）；构建网关需要 Go 1.26+（无系统 Go 时用 `GO=/path/to/go` 或 `--go` 指定）。
+- 架构：Apple Silicon 原生构建 arm64 容器，Intel/AMD 为 amd64，无需 Rosetta/qemu。
+- 仓库已公开，克隆无需 GitHub 凭据。
 - 网页密码、网关 API Key、bridge token 首次启动自动生成，分别保存在数据卷 `data/web/` 与 `data/gateway/`（0600，不入 Git）。
 
 ## 部署（一条命令）
@@ -64,7 +66,8 @@ python3 skill/scripts/deploy_workbuddy_ccswitch.py tunnel user@server --port 183
 - **web.token / 网关 apiKey / bridge token 互不相同**：迁移时用到哪份拷哪份；全新部署会生成全新的，Hermes 侧要同步换 `key_env`。
 - **两套实例不得共用同一批账号状态**：迁移 `data/gateway` + `data/web` 前先停旧实例，排除 `*.sock` 与日志，且按目标机用户修正 UID/GID。
 - healthcheck 的 `Basic` 字符串拼接、`accounts: null` 兼容、秒/毫秒时间戳兼容已在仓库代码内处理，不要"顺手简化"。
-- 私库 clone 失败先查凭据（`gh auth status`），不要把 token 拼进 URL。
+- Windows 上 Docker Desktop 必须在运行（WSL2 后端）；`scripts/backup-current.sh`、`scripts/rollback.sh` 是 bash 脚本，Windows 用户在 WSL2 中执行。
+- token 拼进 URL 是坏做法；凭据问题先查对应凭据文件或 `gh auth status`。
 
 ## 完成标准
 
