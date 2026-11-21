@@ -25,6 +25,19 @@ metadata:
 - 仓库已公开，克隆无需 GitHub 凭据。
 - 网页密码、网关 API Key、bridge token 首次启动自动生成，分别保存在数据卷 `data/web/` 与 `data/gateway/`（0600，不入 Git）。
 
+## 依赖安装（新电脑先跑一次）
+
+```bash
+python3 skill/scripts/deploy_workbuddy_ccswitch.py deps            # 检测并自动安装缺失依赖
+python3 skill/scripts/deploy_workbuddy_ccswitch.py deps --dry-run  # 只看计划，不安装
+```
+
+- **docker / git**：Linux 走官方脚本与包管理器（需 sudo），macOS 走 Homebrew，Windows 走 winget；Docker Desktop 装完需手动启动一次。
+- **go**：自动下载 go.dev 最新稳定版到用户目录（`~/.local/wbcc-go` 或 `%LOCALAPPDATA%\wbcc-go`），SHA256 校验，无需 root；deploy 时缺 go 也会自动装。
+- **hermes**：Hermes 官方安装脚本（Windows 需在 WSL 或 Git Bash 中）。
+- **ccswitch**：从 `farion1231/cc-switch` 最新 release 下载对应平台安装包（SHA256 校验，GitHub API 限流时自动改用 gh 认证）到 `~/Downloads`；已安装则跳过。
+- 服务器只需 docker/git/go；hermes 与 ccswitch 装在你使用 AI 工具的电脑上。
+
 ## 部署（一条命令）
 
 脚本位置：安装为技能后用技能目录下的 `scripts/deploy_workbuddy_ccswitch.py`；在仓库内直接用时为 `skill/scripts/deploy_workbuddy_ccswitch.py`。下文命令以仓库内路径示意。

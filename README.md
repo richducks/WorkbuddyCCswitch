@@ -42,6 +42,8 @@ docker compose ps
 
 更省事的路径：直接用跨平台的部署脚本 `python3 skill/scripts/deploy_workbuddy_ccswitch.py deploy --dir ./WorkbuddyCCswitch`（克隆、构建、启动、健康检查一条命令完成），Windows 上把 `python3` 换成 `python`。
 
+全新电脑可先运行 `python3 skill/scripts/deploy_workbuddy_ccswitch.py deps`：自动检测并安装缺失的 docker/git/go（go 装到用户目录，无需 root），也可下载最新版 Hermes Agent 与 CC Switch（`--only hermes,ccswitch`，SHA256 校验）。加 `--dry-run` 先看计划。
+
 `scripts/backup-current.sh` 与 `scripts/rollback.sh` 是 bash 脚本（备份、回滚 systemd 旧方案），仅 Linux/macOS 可直接运行，Windows 用户请在 WSL2 中执行或手动复制 `data/`。
 
 默认管理网页为 `http://127.0.0.1:8080/`，用户名 `admin`。首次启动生成的网页登录密码保存在私有文件 `data/web/web.token`；网关 API Key 和 CC Switch 用量 token 是另外两份凭据。

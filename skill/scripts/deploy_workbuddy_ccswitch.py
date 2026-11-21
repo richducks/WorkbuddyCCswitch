@@ -6,21 +6,40 @@ sends any token, credential or private data anywhere.
 """
 from __future__ import annotations
 
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import argparse
+import hashlib
+import json
 import os
+import platform
 import shutil
 import socket
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
+import zipfile
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 REPO = "https://github.com/richducks/WorkbuddyCCswitch.git"
 BRANCH = "main"
+CC_SWITCH_REPO = "https://api.github.com/repos/farion1231/cc-switch/releases/latest"
+HERMES_INSTALL = "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+
+
+def go_install_dir() -> Path:
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData/Local")
+        return Path(base) / "wbcc-go"
+    return Path.home() / ".local" / "wbcc-go"
+
+
+def host_os() -> str:
+    return platform.system()  # Linux / Darwin / Windows
 
 
 def fail(msg: str) -> NoReturn:
@@ -36,6 +55,44 @@ def sh(cmd: list[str], cwd: Path | None = None, timeout: int = 600) -> str:
         )[-1500:]
         fail(f"`{' '.join(cmd)}` 失败\n{detail}")
     return proc.stdout
+
+
+def run_visible(cmd: list[str], cwd: Path | None = None) -> bool:
+    """Run a command with inherited stdio; returns True on exit 0."""
+    try:
+        return subprocess.run(cmd, cwd=cwd).returncode == 0
+    except OSError as e:
+        print(f"  （无法执行 {cmd[0]}：{e}）")
+        return False
+
+
+def sudo_ready() -> bool:
+    if host_os() == "Windows" or shutil.which("sudo") is None:
+        return False
+    return subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+
+
+def fetch_json(url: str, headers: dict | None = None) -> Any:
+    req = Request(url, headers=headers or {})
+    with urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def download(url: str, dest: Path, expect_sha256: str | None = None) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  下载 {url.split('/')[-1]} → {dest}")
+    digest = hashlib.sha256()
+    with urlopen(url, timeout=120) as resp, open(dest, "wb") as fh:
+        while chunk := resp.read(1 << 20):
+            digest.update(chunk)
+            fh.write(chunk)
+    got = digest.hexdigest()
+    if expect_sha256 and got.lower() != expect_sha256.lower():
+        dest.unlink(missing_ok=True)
+        fail(f"SHA256 不匹配（期望 {expect_sha256[:16]}…，实际 {got[:16]}…）；已删除下载文件")
+    if expect_sha256:
+        print(f"  SHA256 校验通过：{got[:16]}…")
+    return dest
 
 
 def compose(repo_dir: Path, *args: str) -> str:
@@ -71,9 +128,308 @@ def require_ports_free(repo_dir: Path) -> None:
             "；请在 .env 中改用空闲端口")
 
 
+# ---------------------------------------------------------------- deps ----
+
+DEPS = ("docker", "git", "go", "python", "hermes", "ccswitch")
+
+
+def linux_pkg() -> str:
+    for cand in ("apt-get", "dnf", "yum", "pacman", "zypper"):
+        if shutil.which(cand):
+            return cand
+    return ""
+
+
+def docker_status() -> str:
+    if not shutil.which("docker"):
+        return "missing"
+    if subprocess.run(["docker", "version", "--format", "{{.Server.Version}}"],
+                      capture_output=True, timeout=15).returncode == 0:
+        return "ok"
+    return "daemon-down"
+
+
+def install_docker() -> None:
+    s = host_os()
+    if s == "Linux":
+        if sudo_ready():
+            print("  运行官方安装脚本（get.docker.com，需要 sudo）…")
+            if run_visible(["sudo", "sh", "-c", "curl -fsSL https://get.docker.com | sh"]):
+                run_visible(["sudo", "usermod", "-aG", "docker", os.environ.get("USER", "")] if
+                            os.environ.get("USER") else ["true"])
+                print("  已安装。请注销重新登录（或 newgrp docker）使用免 sudo 的 docker。")
+                return
+        print("  请手动执行：sudo sh -c 'curl -fsSL https://get.docker.com | sh'")
+        return
+    if s == "Darwin":
+        if shutil.which("brew"):
+            print("  brew install --cask docker …")
+            if run_visible(["brew", "install", "--cask", "docker"]):
+                print("  已安装。请手动启动 Docker.app 完成首次初始化。")
+                return
+        else:
+            print("  未找到 Homebrew；先安装：/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+        print("  或从 https://www.docker.com/products/docker-desktop/ 下载 Docker Desktop")
+        return
+    if shutil.which("winget"):
+        print("  winget 安装 Docker Desktop …")
+        if run_visible(["winget", "install", "-e", "--id", "Docker.DockerDesktop",
+                        "--accept-source-agreements", "--accept-package-agreements"]):
+            print("  已安装。请启动 Docker Desktop 并等待其就绪。")
+            return
+    print("  请从 https://www.docker.com/products/docker-desktop/ 下载 Docker Desktop（Windows 需 WSL2）")
+
+
+def install_git() -> None:
+    s = host_os()
+    if s == "Linux" and sudo_ready():
+        pkg = linux_pkg()
+        cmd = {"apt-get": ["sudo", "apt-get", "install", "-y", "git"],
+               "dnf": ["sudo", "dnf", "install", "-y", "git"],
+               "yum": ["sudo", "yum", "install", "-y", "git"],
+               "pacman": ["sudo", "pacman", "-S", "--noconfirm", "git"],
+               "zypper": ["sudo", "zypper", "-n", "in", "git"]}.get(pkg, [])
+        if cmd and run_visible(cmd):
+            return
+    elif s == "Darwin" and shutil.which("brew"):
+        if run_visible(["brew", "install", "git"]):
+            return
+    elif s == "Windows" and shutil.which("winget"):
+        if run_visible(["winget", "install", "-e", "--id", "Git.Git",
+                        "--accept-source-agreements", "--accept-package-agreements"]):
+            return
+    print(f"  请手动安装 git（{s} 官网 https://git-scm.com/downloads）")
+
+
+def install_go() -> Path:
+    """User-level Go toolchain from go.dev with SHA256 verification; no root needed."""
+    s = host_os()
+    osmap = {"Linux": "linux", "Darwin": "darwin", "Windows": "windows"}
+    amap = {"x86_64": "amd64", "amd64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
+    goos, goarch = osmap[s], amap.get(platform.machine().lower(), "")
+    if not goarch:
+        fail(f"架构 {platform.machine()} 不受支持，无法自动安装 Go")
+    releases = fetch_json("https://go.dev/dl/?mode=json")
+    files = [f for f in releases[0]["files"]
+             if f["os"] == goos and f["arch"] == goarch and f["kind"] == "archive"]
+    if not files:
+        fail(f"go.dev 上没有 {goos}/{goarch} 的归档")
+    meta = files[0]
+    tmp = Path(tempfile.mkdtemp(prefix="wbcc-go-"))
+    archive = download("https://go.dev/dl/" + meta["filename"], tmp / meta["filename"],
+                       meta["sha256"])
+    install_dir = go_install_dir()
+    if install_dir.exists():
+        shutil.rmtree(install_dir, ignore_errors=True)
+    install_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  解压到 {install_dir}")
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(install_dir)
+    else:
+        with tarfile.open(archive) as tf:
+            tf.extractall(install_dir)
+    shutil.rmtree(tmp, ignore_errors=True)
+    go_bin = install_dir / "go" / "bin" / ("go.exe" if s == "Windows" else "go")
+    if not go_bin.exists():
+        fail("Go 安装后未找到可执行文件")
+    print(f"  Go {meta['version']} 安装完成：{go_bin}")
+    return go_bin
+
+
+def go_ready() -> bool:
+    return bool(shutil.which("go") or os.environ.get("GO"))
+
+
+def hermes_installed() -> bool:
+    return bool(shutil.which("hermes"))
+
+
+def install_hermes() -> None:
+    s = host_os()
+    if s == "Windows":
+        if shutil.which("bash"):
+            print("  通过 bash（Git Bash/WSL）运行官方安装脚本…")
+            if run_visible(["bash", "-lc", HERMES_INSTALL]):
+                return
+        print("  Windows 安装 Hermes：在 WSL 中执行 curl -fsSL "
+              "https://hermes-agent.nousresearch.com/install.sh | bash（详见 "
+              "https://hermes-agent.nousresearch.com/docs/）")
+        return
+    print("  运行 Hermes 官方安装脚本…")
+    if run_visible(["bash", "-c", HERMES_INSTALL]):
+        print("  已安装。首次使用运行 hermes setup 完成初始化。")
+    else:
+        print(f"  请手动执行：{HERMES_INSTALL}")
+
+
+def ccswitch_release() -> dict | None:
+    headers = {"User-Agent": "wbcc-deploy", "Accept": "application/vnd.github+json"}
+    try:
+        return fetch_json(CC_SWITCH_REPO, headers=headers)
+    except HTTPError as e:
+        if e.code in (403, 429) and shutil.which("gh"):
+            out = subprocess.run(["gh", "api", "repos/farion1231/cc-switch/releases/latest"],
+                                 capture_output=True, text=True)
+            if out.returncode == 0:
+                print("  （匿名 API 被限流，改用 gh 认证查询）")
+                return json.loads(out.stdout)
+        print(f"  无法获取最新版本（GitHub API {e.code}）；请到 "
+              "https://github.com/farion1231/cc-switch/releases 手动下载")
+        return None
+    except OSError as e:
+        print(f"  无法获取最新版本（{e}）；请到 "
+              "https://github.com/farion1231/cc-switch/releases 手动下载")
+        return None
+
+
+def ccswitch_installed() -> bool:
+    s = host_os()
+    if s == "Darwin":
+        return (Path("/Applications/CC Switch.app").exists()
+                or (Path.home() / "Applications" / "CC Switch.app").exists())
+    if s == "Windows":
+        bases = [os.environ.get(k) for k in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)") if os.environ.get(k)]
+        for base in bases:
+            for name in ("cc-switch", "CC Switch", "CC-Switch"):
+                if (Path(base) / name).exists():
+                    return True
+        return False
+    if shutil.which("cc-switch"):
+        return True
+    for d in (Path("/usr/share/applications"), Path.home() / ".local/share/applications"):
+        if d.is_dir():
+            for df in d.glob("*.desktop"):
+                text = df.read_text(errors="ignore").lower()
+                if "cc-switch" in text or ("cc switch" in text):
+                    return True
+    return False
+
+
+def install_ccswitch() -> None:
+    s = host_os()
+    if s == "Darwin" and shutil.which("brew"):
+        print("  brew install --cask cc-switch …")
+        if run_visible(["brew", "install", "--cask", "cc-switch"]):
+            return
+    amap = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "arm64", "aarch64": "arm64"}
+    arch = amap.get(platform.machine().lower(), "")
+    ext = {"Darwin": ".dmg", "Windows": ".msi", "Linux": ".appimage"}.get(s, "")
+    if not ext or (s != "Darwin" and not arch):
+        print(f"  请到 https://github.com/farion1231/cc-switch/releases 手动下载 {s} 安装包")
+        return
+
+    def asset_ok(name: str) -> bool:
+        lower = name.lower()
+        if not lower.endswith(ext):
+            return False
+        if s == "Darwin":
+            return "macos" in lower and "arm64" not in lower  # universal build
+        if s == "Windows":
+            return ("arm64" in lower) == (arch == "arm64")
+        return arch in lower
+
+    release = ccswitch_release()
+    if not release:
+        return
+    version = release.get("tag_name", "")
+    assets = [a for a in release.get("assets", []) if asset_ok(a["name"])]
+    if not assets:
+        print(f"  最新版 {version} 没有 {s}/{arch or '*'}{ext} 资产；请到 releases 页手动选择")
+        return
+    asset = assets[0]
+    digest = (asset.get("digest") or "").removeprefix("sha256:") or None
+    downloads = Path.home() / "Downloads"
+    dest = download(asset["browser_download_url"], downloads / asset["name"], digest)
+    if ext == ".AppImage":
+        dest.chmod(0o755)
+        print(f"  已就绪：直接运行 {dest}（如缺 libfuse2：sudo apt install libfuse2；"
+              "或改用 releases 页的 .deb/.rpm）")
+    elif ext == ".dmg":
+        print(f"  已下载 {dest}：双击安装，或执行 open '{dest}'")
+    else:
+        print(f"  已下载 {dest}：双击运行安装，或执行 start /wait \"\" \"{dest}\"")
+
+
+def cmd_deps(args) -> None:
+    only = {x.strip() for x in args.only.split(",")} if args.only else set(DEPS)
+    unknown = only - set(DEPS)
+    if unknown:
+        fail(f"未知依赖：{unknown}；可选 {DEPS}")
+    plan = []
+    if args.dry_run:
+        print("== dry-run：仅显示将要执行的检查/安装 ==")
+    if "docker" in only:
+        status = docker_status()
+        if args.dry_run:
+            plan.append(f"docker: {status}" + ("；缺失时按平台安装（get.docker.com / brew cask / winget）" if status != "ok" else ""))
+        elif status == "ok":
+            print("[OK] docker：CLI 与守护进程正常")
+        else:
+            print(f"[..] docker：{status}")
+            install_docker()
+    if "git" in only:
+        if args.dry_run:
+            plan.append(f"git: {'ok' if shutil.which('git') else '缺失时按平台安装（apt/dnf/brew/winget）'}")
+        elif shutil.which("git"):
+            print("[OK] git")
+        else:
+            print("[..] git 未安装")
+            install_git()
+    if "go" in only:
+        if args.dry_run:
+            plan.append(f"go: {'ok' if go_ready() else '缺失时自动安装用户级工具链到 ' + str(go_install_dir()) + '（go.dev 最新版，SHA256 校验）'}")
+        elif go_ready():
+            print("[OK] go（PATH 或 GO 环境变量）")
+        else:
+            print("[..] go 未安装")
+            go_bin = install_go()
+            os.environ["GO"] = str(go_bin)
+            print(f"  后续使用：export GO={go_bin}（Windows: set GO={go_bin}）")
+    if "python" in only:
+        if args.dry_run:
+            plan.append(f"python: {'ok ('+platform.python_version()+')' if sys.version_info >= (3,9) else '版本过旧，需 3.9+'}")
+        elif sys.version_info >= (3, 9):
+            print(f"[OK] python {platform.python_version()}")
+        else:
+            print(f"[..] python {platform.python_version()} 过旧（需 3.9+）；"
+                  "Windows: winget install Python.Python.3.13；macOS: brew install python@3.13")
+    if "hermes" in only:
+        if args.dry_run:
+            plan.append(f"hermes: {'ok' if hermes_installed() else '缺失时运行官方安装脚本 ' + HERMES_INSTALL}")
+        elif hermes_installed():
+            print("[OK] hermes")
+        else:
+            print("[..] hermes 未安装")
+            install_hermes()
+    if "ccswitch" in only:
+        if args.dry_run:
+            plan.append("ccswitch: 检测常见安装位置；缺失时从 farion1231/cc-switch 最新 release 下载"
+                        "对应平台安装包（SHA256 校验，保存到 ~/Downloads）")
+        elif ccswitch_installed():
+            print("[OK] ccswitch（检测到已安装）")
+        else:
+            print("[..] ccswitch 未检测到")
+            install_ccswitch()
+    if args.dry_run:
+        for line in plan:
+            print("  - " + line)
+    else:
+        print("提示：服务器只需要 docker/git/go；hermes 与 ccswitch 装在你使用 AI 工具的电脑上。")
+
+
+# --------------------------------------------------------------- deploy ----
+
 def cmd_deploy(args) -> None:
-    if not (shutil.which("docker") and shutil.which("git")):
-        fail("需要先安装 docker（含 compose 插件）和 git")
+    status = docker_status()
+    if status == "missing":
+        fail("docker 未安装：先运行 deps 子命令自动安装，或按平台手动安装")
+    if status == "daemon-down":
+        hint = {"Darwin": "请先启动 Docker Desktop", "Windows": "请先启动 Docker Desktop"}.get(
+            host_os(), "请启动 docker 服务（sudo systemctl start docker）")
+        fail(f"docker 守护进程未运行：{hint}")
+    if not shutil.which("git"):
+        fail("git 未安装：先运行 deps 子命令")
     repo_dir = Path(args.dir).resolve()
     if repo_dir.exists():
         if not (repo_dir / ".git").is_dir():
@@ -84,8 +440,9 @@ def cmd_deploy(args) -> None:
         sh(["git", "clone", "--branch", BRANCH, "--", REPO, str(repo_dir)], timeout=300)
     head = sh(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).strip()
     print(f"Checked out {BRANCH} @ {head[:12]}")
-    if not (shutil.which("go") or os.environ.get("GO")):
-        fail("构建网关需要 Go 1.26+ 工具链；请先安装 Go，或用 GO=/path/to/go 指定")
+    if not go_ready():
+        print("[..] go 未安装——自动安装用户级工具链")
+        os.environ["GO"] = str(install_go())
     if not (repo_dir / "bin/workbuddy-gateway-manual").exists():
         print("Building pinned gateway binary (first run downloads upstream source)")
         sh([sys.executable, "scripts/build_gateway.py"], cwd=repo_dir, timeout=1800)
@@ -137,7 +494,9 @@ def cmd_tunnel(args) -> None:
     if not port_free(args.port):
         fail(f"本地端口 {args.port} 已被占用")
     if shutil.which("ssh") is None:
-        fail("需要 openssh-client")
+        hint = {"Windows": "启用 Windows 可选功能 OpenSSH 客户端，或安装 Git for Windows"}.get(
+            host_os(), "安装 openssh-client")
+        fail(f"未找到 ssh：{hint}")
     cmd = ["ssh", "-NT", "-o", "ExitOnForwardFailure=yes",
            "-L", f"127.0.0.1:{args.port}:127.0.0.1:{args.server_gw}",
            "-L", f"127.0.0.1:{args.port + 100}:127.0.0.1:{args.server_web}"]
@@ -155,6 +514,11 @@ def cmd_tunnel(args) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "WorkbuddyCCswitch deployment helper").splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+
+    deps = sub.add_parser("deps", help="检测并安装缺失依赖（docker/git/go/python/hermes/ccswitch）")
+    deps.add_argument("--only", default="", help="只处理指定依赖，逗号分隔")
+    deps.add_argument("--dry-run", action="store_true", help="只显示计划，不做任何安装")
+    deps.set_defaults(func=cmd_deps)
 
     deploy = sub.add_parser("deploy", help="克隆、构建并启动 Docker 栈")
     deploy.add_argument("--dir", default="./WorkbuddyCCswitch")
