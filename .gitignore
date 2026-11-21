@@ -13,3 +13,4 @@ __pycache__/
 *.sqlite*
 *.db
 .DS_Store
+/config/config.json
