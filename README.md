@@ -51,6 +51,16 @@ ssh -NT -o ExitOnForwardFailure=yes \
 
 隧道连通后，在本地浏览器打开 `http://127.0.0.1:18080/`，使用控制台给出的 WorkBuddy 配置在本地 Hermes 接入 `http://127.0.0.1:8317/v1`。如有端口冲突，调整相应的本地转发端口及 Hermes 的 Base URL。不需要将 Docker 的业务端口开放到公网。
 
+## 打包 Skill（可选）
+
+仓库自带 `skill/` 目录，可把本项目作为一套 Agent 技能安装给他人使用（克隆仓库后即可部署、验证、打通隧道）：
+
+- `skill/SKILL.md` —— 技能说明与完整流程
+- `skill/scripts/deploy_workbuddy_ccswitch.py` —— `deploy` / `verify` / `tunnel` 三合一部署脚本
+- `skill/references/remote-hermes.md` —— 服务器部署 + 本地 Hermes 对接细节
+
+安装到 Hermes：把 `skill/` 目录复制为 `~/.hermes/skills/deploy-workbuddy-ccswitch/`（或按所用 Agent 的技能目录放置）。
+
 ## 网页功能
 
 | 区域 | 内容 |
