@@ -29,7 +29,7 @@
 
 支持 Linux、macOS 和 Windows，三平台运行同一个 Docker 栈（容器内行为完全一致）。宿主机需要：Docker（Linux 用 Docker Engine + compose 插件；macOS / Windows 用 Docker Desktop，Windows 需启用 WSL2 后端）、Git、Python 3.9+，以及 Go 1.26+（构建网关用；无系统 Go 时用 `--go` 或环境变量 `GO` 指定）。Apple Silicon 原生构建 arm64 容器，Intel/AMD 为 amd64。
 
-仓库不包含编译后的网关；构建脚本会拉取固定的 WorkBuddy Gateway v1.14.47 源码、校验提交、应用本地补丁并运行签到测试。
+仓库不包含编译后的网关；构建脚本会拉取固定的 WorkBuddy Gateway v1.14.47 源码、校验提交、应用本地补丁（手动签到 + 到期优先调度）并运行签到与调度策略测试。
 
 ```bash
 cd WorkbuddyCCswitch
@@ -115,6 +115,12 @@ python3 scripts/refresh-hermes-models.py   # 只改 providers.workbuddy.models�
 - 「补签」与「手动签到」均经同一个本地签到执行器，不清零已用尝试次数；启动补签已排队且自动签到开启时，等待原队列执行。接近北京时间午夜不发起跨日请求。
 - 关闭自动签到后，已发出的请求不会被取消；重新开启不会改写已有计划。主机休眠期间不会执行自动签到。
 
+## 调度策略：到期日最短优先（expireFirst）
+
+- 容器环境变量 `WB_SCHEDULING_STRATEGY=expireFirst` 开启（仓库默认已开）：同优先级可用账号不再轮换，而是固定选「积分周期到期最早」的账号，把它先用完再自然落到下一个；到期相同/未知时退回轮询顺序。缺省或删除该变量即恢复上游轮询行为。
+- 到期时间来自上游完整权益接口中每个有效资源包的扣减周期截止，按 `DeductionEndTime > ExpiredTime > CycleEndTime` 取最早的一个，额度周期刷新后自动更新；账号级展示在状态快照的 `quotaExpireAt` 字段。
+- 选号层级保持上游语义（免费耗尽账号优先 → 有余额账号 → 零余额受控探测），expireFirst 只在每一层级内部比较到期时间；账号黑白名单、冷却与失效排除规则不受影响。
+
 ## 验证
 
 ```bash
@@ -136,9 +142,9 @@ curl -i http://127.0.0.1:8318/usage        # 默认端口，未认证应返回 4
 
 ## 限制
 
-- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，运行 `python3 scripts/build_gateway.py`（Go 1.26+，`--goarch amd64|arm64` 可覆盖目标架构，默认跟随本机）。脚本验证上游提交并运行签到测试；升级前必须重新核对上游 `checkin.go` 与状态文件。
+- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，运行 `python3 scripts/build_gateway.py`（Go 1.26+，`--goarch amd64|arm64` 可覆盖目标架构，默认跟随本机）。脚本验证上游提交、应用 `gateway-overlay/` 两个补丁并运行签到与调度策略测试；升级前必须重新核对上游 `checkin.go`、`main.go` 选号逻辑与状态文件。
 - 扫码必须由账号本人在网页显示的二维码/链接上完成，无法自动化。
-- 账号池按可用性调度，网页展示分账号信息不代表可在单次请求中固定使用某个账号。
+- 账号池按可用性调度（当前为到期日最短优先，见上文），网页展示分账号信息不代表可在单次请求中固定使用某个账号。
 - 二维码登录进程最多等待 `LOGIN_TIMEOUT`（默认 300 秒），超时自动终止。
 
 ## 文件
@@ -148,7 +154,7 @@ Dockerfile              镜像定义（python:3.11-slim + gosu 降权）
 docker-compose.yml      端口映射与数据卷
 docker-entrypoint.sh    卷属主修正 + 降权
 bin/workbuddy-gateway-manual   本地生成，不纳入 Git
-gateway-overlay/               手动签到补丁和调度器测试
+gateway-overlay/               手动签到补丁与到期优先调度补丁（含单元测试）
 config/config.json.example  网关配置模板（首次启动生成密钥）
 app/boot.py             启动编排
 app/controller.py       账号/登录会话/标签/Hermes 信息

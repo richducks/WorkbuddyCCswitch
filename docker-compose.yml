@@ -10,6 +10,9 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
+      # 调度策略：expireFirst = 同优先级可用账号按「积分周期到期最早」优先（快到期的先用掉）。
+      # 缺省/其他值保持上游轮询；回滚到上游二进制时本变量被忽略，可安全保留。
+      WB_SCHEDULING_STRATEGY: "expireFirst"
       GW_PORT: "8317"
       HOST_GW_PORT: "${HOST_GW_PORT:-8317}"
       BRIDGE_PORT: "8318"

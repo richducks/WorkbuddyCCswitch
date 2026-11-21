@@ -1,0 +1,99 @@
+diff --git a/main.go b/main.go
+index 7309658..6525d32 100644
+--- a/main.go
++++ b/main.go
+@@ -487,6 +487,7 @@ type Account struct {
+ 	QuotaKnown     bool                          // 是否已成功获取过额度
+ 	QuotaExhausted bool                          // 已确认额度为 0；额度扫描发现恢复后自动解除
+ 	QuotaUnlimited bool                          // 企业版 limitNum=-1：分配额度不限，禁止按 0 余额阻断
++	QuotaExpireAt  time.Time                     // 最近一次完整权益查询得到的最早额度周期截止（积分到期）；零值=未知
+ 	ModelStates    map[string]*modelRuntimeState // 按模型隔离的成本、限流和额度阻断状态
+ 	fingerprint    string                        // 凭据文件变更指纹（mtime+size，凭据热加载用）
+ 	lock           sync.RWMutex                  // 凭据维护写锁；模型发送共享读锁，并发数由 concurrent 控制
+@@ -1405,6 +1406,11 @@ func nextAccountForModel(model string, attempted map[*Account]bool) (*Account, a
+ 
+ 	pick := func(siteFilter func(string) bool) (*Account, accountSelectionKind, bool) {
+ 		for _, wanted := range []accountSelectionKind{selectionFreeExhausted, selectionNormal, selectionProbeExhausted} {
++			// expireFirst 开启时在同级候选里选「额度周期到期最早」的账号（积分快到期先用掉），
++			// 到期相同/未知退回轮询距离；未开启时保持上游行为：第一个可用账号立即返回。
++			bestIdx := -1
++			var bestEnd time.Time
++			bestDist := 0
+ 			for i := 0; i < len(accounts); i++ {
+ 				idx := (rrIndex + i) % len(accounts)
+ 				acc := accounts[idx]
+@@ -1421,11 +1427,24 @@ func nextAccountForModel(model string, attempted map[*Account]bool) (*Account, a
+ 				if !ok || kind != wanted {
+ 					continue
+ 				}
+-				if kind == selectionProbeExhausted {
++				if !expireFirstEnabled() {
++					if kind == selectionProbeExhausted {
++						modelStateLocked(acc, model).NextProbeAt = now.Add(modelProbeDelay)
++					}
++					rrIndex = (idx + 1) % len(accounts)
++					return acc, kind, true
++				}
++				if bestIdx < 0 || expireFirstBetter(bestEnd, bestDist, acc.QuotaExpireAt, i) {
++					bestIdx, bestEnd, bestDist = idx, acc.QuotaExpireAt, i
++				}
++			}
++			if bestIdx >= 0 {
++				acc := accounts[bestIdx]
++				if wanted == selectionProbeExhausted {
+ 					modelStateLocked(acc, model).NextProbeAt = now.Add(modelProbeDelay)
+ 				}
+-				rrIndex = (idx + 1) % len(accounts)
+-				return acc, kind, true
++				rrIndex = (bestIdx + 1) % len(accounts)
++				return acc, wanted, true
+ 			}
+ 		}
+ 		return nil, "", false
+@@ -2338,6 +2357,7 @@ func refreshAccountQuota(ctx context.Context, acc *Account) error {
+ 	now := time.Now()
+ 	resources, planErr := fetchPlanResources(ctx, prof, headers, traceID, path, now)
+ 	if planErr == nil {
++		setAccountQuotaExpiry(acc, resources, now)
+ 		plan, planErr = identifyPlan(prof.Key, summary, resources, now)
+ 	}
+ 	wasExhausted, exhausted, plan := applyQuotaObservation(acc, total, used, remaining, false, paid, plan, planErr == nil, now)
+@@ -2679,16 +2699,18 @@ type accountSnapshot struct {
+ 	PlanCheckedAt     int64              `json:"planCheckedAt,omitempty"`
+ 	PlanStale         bool               `json:"planStale,omitempty"`
+ 	// 登录续期状态：刷新令牌到期时间与最近成功续期时间，便于提前发现需要重新登录的账号。
+-	RefreshExpiresAt int64                         `json:"refreshExpiresAt,omitempty"`
+-	LastRefreshTime  int64                         `json:"lastRefreshTime,omitempty"`
+-	RefreshFailCount int                           `json:"refreshFailCount,omitempty"`
+-	QuotaKnown       bool                          `json:"quotaKnown,omitempty"`
+-	QuotaExhausted   bool                          `json:"quotaExhausted,omitempty"`
+-	QuotaUnlimited   bool                          `json:"quotaUnlimited,omitempty"`
+-	ModelStates      map[string]modelStateSnapshot `json:"modelStates,omitempty"`
+-	FreeModels       int                           `json:"freeModels,omitempty"` // 旧版快照兼容字段；账号表不再显示，不参与调度
+-	ModelCooldowns   int                           `json:"modelCooldowns,omitempty"`
+-	Checkin          checkinStatusSnapshot         `json:"checkin"`
++	RefreshExpiresAt int64 `json:"refreshExpiresAt,omitempty"`
++	LastRefreshTime  int64 `json:"lastRefreshTime,omitempty"`
++	RefreshFailCount int   `json:"refreshFailCount,omitempty"`
++	QuotaKnown       bool  `json:"quotaKnown,omitempty"`
++	QuotaExhausted   bool  `json:"quotaExhausted,omitempty"`
++	QuotaUnlimited   bool  `json:"quotaUnlimited,omitempty"`
++	// 最早额度周期截止（积分到期时间，Unix 秒）；0=未知（未查询/企业号）。
++	QuotaExpireAt  int64                         `json:"quotaExpireAt,omitempty"`
++	ModelStates    map[string]modelStateSnapshot `json:"modelStates,omitempty"`
++	FreeModels     int                           `json:"freeModels,omitempty"` // 旧版快照兼容字段；账号表不再显示，不参与调度
++	ModelCooldowns int                           `json:"modelCooldowns,omitempty"`
++	Checkin        checkinStatusSnapshot         `json:"checkin"`
+ }
+ 
+ type modelStateSnapshot struct {
+@@ -2741,6 +2763,9 @@ func writeStatusSnapshot() error {
+ 		as.QuotaKnown = acc.QuotaKnown
+ 		as.QuotaExhausted = acc.QuotaExhausted
+ 		as.QuotaUnlimited = acc.QuotaUnlimited
++		if !acc.QuotaExpireAt.IsZero() {
++			as.QuotaExpireAt = acc.QuotaExpireAt.Unix()
++		}
+ 		if len(acc.ModelStates) > 0 {
+ 			as.ModelStates = make(map[string]modelStateSnapshot, len(acc.ModelStates))
+ 			for model, state := range acc.ModelStates {
