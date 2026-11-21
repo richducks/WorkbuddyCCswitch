@@ -48,6 +48,16 @@ docker compose ps
 
 默认管理网页为 `http://127.0.0.1:8080/`，用户名 `admin`。首次启动生成的网页登录密码保存在私有文件 `data/web/web.token`；网关 API Key 和 CC Switch 用量 token 是另外两份凭据。
 
+**可信局域网直接访问（可选，优先用 SSH 隧道）**：在 `.env` 中将 `BIND_IP` 改为 Docker 宿主机的具体私有 IPv4 地址，再运行 `docker compose up -d --build`。不支持 `0.0.0.0` 或公网地址。三个端口按配置发布到同一个地址：
+
+| 服务 | 访问地址（示例使用默认端口） | 凭据 |
+|---|---|---|
+| 管理网页 | `http://<BIND_IP>:8080/`（`HOST_WEB_PORT`） | 用户名 `admin`，密码在 `data/web/web.token` |
+| Hermes 模型网关 | `http://<BIND_IP>:8317/v1`（`HOST_GW_PORT`） | 网页「复制完整 Key」，或 `data/gateway/config.json` 的 `gateway.apiKey` |
+| CC Switch 用量查询 | Base URL `http://<BIND_IP>:8318`（`HOST_BRIDGE_PORT`），查询 `GET /usage` | `data/web/bridge.token` |
+
+三个端口的 HTTP 流量（含鉴权凭据）均未加密。不要在公网、访客网或未隔离的办公网直接发布，也不要做路由器端口转发。在 Linux 上 [Docker 发布的端口可能绕过 UFW](https://docs.docker.com/engine/network/packet-filtering-firewalls/#docker-and-ufw)，不要依靠单独的 UFW 规则隔离这些端口。
+
 如果 Docker 部署在远程服务器上，下面的命令在运行 Hermes 的电脑上执行（替换 SSH 用户及主机名，端口按服务器 `.env` 调整）：
 
 ```bash
@@ -87,6 +97,8 @@ ssh -NT -o ExitOnForwardFailure=yes \
 
 `data/gateway/` 和 `data/web/` 包含真实凭据和运行状态，不能上传到 Git。跨服务器迁移时，停掉旧实例后通过可信的私有通道复制这两个目录，跳过日志和 Unix 套接字；不要使用同一批账号同时运行两套实例。
 
+恢复备份时请复制为独立文件，不要创建指向备份的硬链接。容器启动会调整已恢复的目录和单链接普通文件的属主，不会跟随符号链接或更改多链接文件的属主。
+
 ```bash
 bash scripts/backup-current.sh      # 本机私有备份，不上传 Git
 ```
@@ -96,8 +108,10 @@ bash scripts/backup-current.sh      # 本机私有备份，不上传 Git
 WorkBuddy 本身的模型目录在网关更新后刷新。若宿主机 Hermes 配置也要同步 WorkBuddy 的新模型：
 
 ```bash
-python3 scripts/refresh-hermes-models.py   # 只改 providers.workbuddy.models，自动备份；随后重启 CC Switch
+python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 providers.workbuddy.models
 ```
+
+局域网绑定或修改了端口时，在运行 Docker 的宿主机上从网页复制刷新命令（含 `--gateway-host` 和 `--gateway-port`）。脚本会备份 Hermes 配置；刷新后重启 CC Switch 以重新导入模型目录。
 
 
 ## 接入非 WorkBuddy 提供商
@@ -126,6 +140,7 @@ python3 scripts/refresh-hermes-models.py   # 只改 providers.workbuddy.models�
 ```bash
 python3 -B scripts/selftest.py          # 不触碰真实账号
 python3 -B scripts/test_providers.py    # 自定义提供商持久化、校验与命令导出
+python3 -B scripts/test_console.py      # 守护退避、缓存并发、登录会话与日志修剪
 docker compose config --quiet
 docker compose ps
 curl -i http://127.0.0.1:8080/api/summary  # 默认端口，未认证应返回 401
@@ -136,8 +151,8 @@ curl -i http://127.0.0.1:8318/usage        # 默认端口，未认证应返回 4
 
 - 数据卷 `0700`，凭据/状态/token 文件 `0600`；进程降权运行。
 - 网页 Basic Auth + 同源校验；API Key 只在 `/api/hermes/key` 返回给已认证会话，页面上默认脱敏。
-- 不输出 UID、昵称、令牌或原始日志到网页；日志中不记录二维码内容。
-- 容器内监听 `0.0.0.0` 是 Docker NAT 的必要条件；宿主机只发布到 `127.0.0.1`。不要改成 `0.0.0.0` 发布。
+- 网页不展示 UID、昵称或原始网关日志。新的登录二维码和备用链接只保存在当前会话内存中，不写入登录日志；会话结束后清除。
+- 宿主机默认仅发布到 `127.0.0.1`。仅在明确需要、且网络可信时启用上述私有地址绑定；跨公网或不可信网络请保留回环设置并使用 SSH 隧道。
 - 只接入本人或明确获授权的微信账号。
 
 ## 限制
@@ -145,7 +160,7 @@ curl -i http://127.0.0.1:8318/usage        # 默认端口，未认证应返回 4
 - 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，运行 `python3 scripts/build_gateway.py`（Go 1.26+，`--goarch amd64|arm64` 可覆盖目标架构，默认跟随本机）。脚本验证上游提交、应用 `gateway-overlay/` 两个补丁并运行签到与调度策略测试；升级前必须重新核对上游 `checkin.go`、`main.go` 选号逻辑与状态文件。
 - 扫码必须由账号本人在网页显示的二维码/链接上完成，无法自动化。
 - 账号池按可用性调度（当前为到期日最短优先，见上文），网页展示分账号信息不代表可在单次请求中固定使用某个账号。
-- 二维码登录进程最多等待 `LOGIN_TIMEOUT`（默认 300 秒），超时自动终止。
+- 二维码登录进程默认等待 `LOGIN_TIMEOUT`（300 秒）；网页状态查询检测到超时后会终止该会话。
 
 ## 文件
 
@@ -156,9 +171,9 @@ docker-entrypoint.sh    卷属主修正 + 降权
 bin/workbuddy-gateway-manual   本地生成，不纳入 Git
 gateway-overlay/               手动签到补丁与到期优先调度补丁（含单元测试）
 config/config.json.example  网关配置模板（首次启动生成密钥）
-app/boot.py             启动编排
+app/boot.py             启动编排（网关守护重启、启动时日志修剪、密钥生成）
 app/controller.py       账号/登录会话/标签/Hermes 信息
-app/checkin.py          补签排队与终态轮询
+app/checkin.py          状态快照与手动签到资格判定
 app/usage_bridge.py     CC Switch 只读用量桥
 app/web.py              网页与 API
 app/static/index.html   配置网页

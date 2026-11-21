@@ -1,9 +1,11 @@
 #!/bin/sh
-# Bind mounts are created root-owned by Docker on first run; fix ownership,
-# then drop to the unprivileged user for the whole stack.
+# Fix ownership for fresh and restored data, but never follow symlinks or
+# change regular files with multiple hard links (which can alias a backup).
 set -e
 WB_UID="$(id -u wb)"
 WB_GID="$(id -g wb)"
-chown "${WB_UID}:${WB_GID}" /data /data/gateway /data/web 2>/dev/null || true
+find /data/gateway /data/web -xdev \( -type d -o \( -type f -links 1 \) \) \
+  -exec chown -h "${WB_UID}:${WB_GID}" {} + 2>/dev/null || true
+chown "${WB_UID}:${WB_GID}" /data 2>/dev/null || true
 chmod 700 /data/gateway /data/web 2>/dev/null || true
 exec gosu wb python3 /app/app/boot.py "$@"

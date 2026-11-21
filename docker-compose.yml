@@ -14,6 +14,7 @@ services:
       # 缺省/其他值保持上游轮询；回滚到上游二进制时本变量被忽略，可安全保留。
       WB_SCHEDULING_STRATEGY: "expireFirst"
       GW_PORT: "8317"
+      HOST_BIND_IP: "${BIND_IP:-127.0.0.1}"
       HOST_GW_PORT: "${HOST_GW_PORT:-8317}"
       BRIDGE_PORT: "8318"
       WEB_PORT: "8080"
@@ -21,9 +22,9 @@ services:
       HOST_BRIDGE_PORT: "${HOST_BRIDGE_PORT:-8318}"
       LOGIN_TIMEOUT: "300"
     ports:
-      - "127.0.0.1:${HOST_WEB_PORT:-8080}:8080"
-      - "127.0.0.1:${HOST_GW_PORT:-8317}:8317"
-      - "127.0.0.1:${HOST_BRIDGE_PORT:-8318}:8318"
+      - "${BIND_IP:-127.0.0.1}:${HOST_WEB_PORT:-8080}:8080"
+      - "${BIND_IP:-127.0.0.1}:${HOST_GW_PORT:-8317}:8317"
+      - "${BIND_IP:-127.0.0.1}:${HOST_BRIDGE_PORT:-8318}:8318"
     volumes:
       - ./data/gateway:/data/gateway
       - ./data/web:/data/web

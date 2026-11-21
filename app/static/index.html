@@ -45,6 +45,7 @@
   .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
   .spacer { flex: 1; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .table-wrap { overflow-x: auto; }
   th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
        border-bottom: 1px solid var(--border); padding: 8px 10px; white-space: nowrap; }
   td { border-bottom: 1px solid var(--border); padding: 11px 10px; vertical-align: middle; }
@@ -58,7 +59,11 @@
   .badge.mute { color: var(--muted); background: rgba(139,148,158,.10); }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .quota { font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; max-width: 70ch; }
+  #modelIds { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #modelIds code { white-space: nowrap; }
+  .provider-row a { color: var(--accent); text-decoration: none; }
+  .provider-row a:hover { text-decoration: underline; }
   .toast { position: fixed; right: 20px; bottom: 20px; max-width: 420px; z-index: 50;
            background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
            border-radius: 8px; padding: 12px 16px; box-shadow: 0 12px 30px rgba(0,0,0,.4); display: none; }
@@ -81,6 +86,13 @@
   .provider-row { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
   .provider-form .full { grid-column: 1 / -1; }
   .provider-form .bar { margin: 0; }
+  @media (max-width: 640px), (pointer: coarse) {
+    body { font-size: 15px; }
+    button { padding: 10px 14px; }
+    button.sm { padding: 8px 12px; font-size: 12.5px; }
+    .wrap { padding: 20px 14px 48px; }
+    .toast { left: 14px; right: 14px; max-width: none; }
+  }
 </style>
 </head>
 <body>
@@ -91,7 +103,7 @@
       <div class="sub">模型提供商 · WorkBuddy 微信账号与签到 · CC Switch 用量桥</div>
     </div>
     <div class="meta">
-      <span class="pill" id="clock">--</span>
+      <span class="pill" id="clock" title="网关报告的当前北京时间">--</span>
       <span class="pill" id="gwPill">网关检测中…</span>
       <span class="pill" id="verPill">--</span>
     </div>
@@ -100,7 +112,7 @@
   <div class="grid">
     <section class="card wide" id="providersCard">
       <h2>模型提供商</h2>
-      <div class="provider-row"><strong>WorkBuddy Gateway</strong> <span class="file">内置 · 账号与签到见下方</span></div>
+      <div class="provider-row"><strong>WorkBuddy Gateway</strong> <span class="file"><a href="#acctCard">内置 · 账号与签到见下方</a></span></div>
       <div id="providerList"><p class="hint">正在读取自定义提供商…</p></div>
       <div class="bar"><button class="primary" type="button" id="addProviderBtn" disabled>＋ 添加提供商</button><button type="button" id="refreshProvidersBtn">刷新列表</button></div>
       <p class="hint">保存后复制配置命令，到运行 Hermes 的宿主机执行。API Key 不填在这里；若需要鉴权，只填写环境变量名。保存或移除预设不会修改 Hermes 的默认模型或备用链。</p>
@@ -118,17 +130,19 @@
     </section>
     <section class="card wide" id="acctCard">
       <h2>WorkBuddy 微信账号池 <span class="n" id="acctCount"></span></h2>
+      <div class="table-wrap">
       <table>
         <thead><tr>
           <th>账号</th><th>来源 / 状态</th><th>额度（积分）</th><th>今日签到</th><th>操作</th>
         </tr></thead>
         <tbody id="acctBody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
       </table>
+      </div>
       <div class="bar">
         <button class="primary" id="addBtn">＋ 添加微信账号</button>
         <button class="primary" id="checkinAllBtn" disabled>一键签到</button>
         <span class="spacer"></span>
-        <button id="refreshBtn">刷新</button>
+        <button id="refreshBtn">刷新状态</button>
       </div>
       <div class="bar">
         <label><input type="checkbox" id="autoCheckinEnabled" disabled> 自动签到</label>
@@ -154,7 +168,7 @@
       <div class="hint">
         在<b>宿主机</b>执行上面的命令，并把 API Key 写入 <code>~/.hermes/.env</code>
         的 <code>WORKBUDDY_GATEWAY_API_KEY</code>（用 Hermes 的安全写入方式）。
-        容器内端口映射到宿主 <code>127.0.0.1</code>，不对局域网开放。
+        端口默认仅发布到宿主回环地址；局域网模式只在可信网络使用。
       </div>
     </section>
 
@@ -162,15 +176,14 @@
       <h2>WorkBuddy 模型目录 <span class="n" id="modelCount"></span></h2>
       <div class="kv">
         <div class="k">可用模型</div><div class="v" id="modelIds">--</div>
-        <div class="k">默认模型</div><div class="v" id="modelDefault">hy3</div>
       </div>
       <div class="bar">
         <button class="sm" id="copyRefreshBtn">复制模型刷新命令</button>
       </div>
       <div class="hint">
         目录来自网关 <code>/v1/models</code>，网关新增模型后自动更新（最长 5 分钟缓存）。
-        上面复制的 provider JSON / 配置命令已包含全部模型；要立即更新宿主机现有 Hermes 配置，在宿主机执行：
-        <code>cd ~/Documents/CodexProjects/WorkbuddyCCswitch &amp;&amp; python3 scripts/refresh-hermes-models.py</code>
+        provider JSON / 配置命令包含全部已读取的模型；要立即更新运行 Docker 的宿主机上的 Hermes，
+        在<b>本仓库目录</b>执行上方复制的刷新命令。
       </div>
     </section>
 
@@ -181,9 +194,12 @@
         <div class="k">用途</div><div class="v">CC Switch 分账号额度与签到状态</div>
         <div class="k">鉴权</div><div class="v">独立 Bearer token（不对外分享）</div>
       </div>
+      <div class="bar">
+        <button class="sm" id="copyBridgeBtn">复制桥地址</button>
+      </div>
       <div class="hint">
         在 CC Switch 的 Hermes 卡片 →「更多 → 配置用量查询」→ 自定义：
-        Base URL 填桥地址，查询专用 API Key 填桥 token。
+        Base URL 填上面的桥地址（与 WorkBuddy 网关地址相同），查询专用 API Key 填桥 token。
         查询脚本：<code>GET {{baseUrl}}/usage</code>，提取器返回 <code>response.entries</code>。
         用量刷新只读，不会触发签到。
       </div>
@@ -211,8 +227,11 @@
 const $ = (s) => document.querySelector(s);
 let summary = null;
 let pollTimer = null;
+let loginGeneration = 0;
+let loginRequest = null;
 let checkinBusy = false;
 let autoSettingsBusy = false;
+let loadFailed = false;
 
 function toast(msg, err=false) {
   const t = $('#toast');
@@ -229,7 +248,16 @@ async function api(path, opts={}) {
 function post(path, body) {
   return api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
 }
-function esc(s) { const d=document.createElement('div'); d.textContent=s==null?'':String(s); return d.innerHTML; }
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML.replaceAll('"', '&quot;');
+}
+function fmtQuota(v) {
+  const n = Number(v);
+  if (v == null || !isFinite(n)) return '—';
+  return n.toLocaleString('zh-CN', {maximumFractionDigits: 2});
+}
 function fmtTime(v) {
   if (!v) return '—';
   const d = new Date(v < 1e12 ? v * 1000 : v);  // 兼容秒 / 毫秒时间戳
@@ -260,7 +288,7 @@ function render(d) {
     body.innerHTML = d.accounts.map((a) => {
       const q = a.quota;
       const quota = q && q.known
-        ? `<span class="quota">${esc(q.remaining)} / ${esc(q.total)}</span>`
+        ? `<span class="quota">${fmtQuota(q.remaining)} / ${fmtQuota(q.total)}</span>`
         : '<span class="empty" style="padding:0">—</span>';
       const source = `${esc(a.edition || '未加载')} · ${esc(a.state || (a.loaded ? '?' : '未加载'))}`;
       const c = a.checkin;
@@ -277,7 +305,7 @@ function render(d) {
         </td>
         <td style="white-space:nowrap">
           <button class="sm manualCheckinBtn" data-file="${esc(a.file)}" ${a.manualEligible && !checkinBusy?'':'disabled'} title="${a.manualEligible?'立即签到，无需重启网关':'当前状态不可手动签到'}">${c.status === 'missed' ? '补签' : '手动签到'}</button>
-          <button class="sm danger renameBtn" data-file="${esc(a.file)}" data-label="${label}">改名</button>
+          <button class="sm renameBtn" data-file="${esc(a.file)}" data-label="${label}">改名</button>
           <button class="sm danger removeBtn" data-file="${esc(a.file)}">移除</button>
         </td></tr>`;
     }).join('');
@@ -288,13 +316,13 @@ function render(d) {
   $('#hModel').textContent = h.model;
   $('#hKey').textContent = h.hasKey ? h.keyMasked : '未生成';
   $('#providerJson').textContent = JSON.stringify(h.providerEntry, null, 2);
-  $('#bridgeUrl').textContent = `http://127.0.0.1:${d.bridgePort}/usage`;
+  $('#bridgeUrl').textContent = d.bridgeUrl + '/usage';
   const models = d.modelCatalog || [];
   $('#modelCount').textContent = `共 ${models.length} 个`;
-  $('#modelIds').textContent = models.length
-    ? models.slice(0, 12).map(m => m.id).join(', ') + (models.length > 12 ? ` … 等 ${models.length} 个` : '')
+  $('#modelIds').innerHTML = models.length
+    ? models.slice(0, 12).map(m => `<code>${esc(m.id)}</code>`).join(' ')
+      + (models.length > 12 ? `<span class="hint" style="margin:0">… 等 ${models.length} 个</span>` : '')
     : '—';
-  $('#modelDefault').textContent = h.model;
 
   document.querySelectorAll('.manualCheckinBtn').forEach(b => b.onclick = () => doManualCheckin(b.dataset.file));
   document.querySelectorAll('.renameBtn').forEach(b => b.onclick = () => {
@@ -313,9 +341,19 @@ function render(d) {
   $('#autoCheckinState').textContent = autoSettingsBusy ? '保存中…' : (d.autoCheckinEnabled ? '已开启' : '已关闭');
 }
 
-async function load() {
-  try { render(await api('/api/summary')); }
-  catch (e) { toast('加载失败：' + e.message, true); }
+async function load(manual = false) {
+  try {
+    render(await api('/api/summary'));
+    if (loadFailed) { toast('连接已恢复'); loadFailed = false; }
+  } catch (e) {
+    if (!loadFailed) {
+      loadFailed = true;
+      const gp = $('#gwPill');
+      gp.textContent = '控制台连接失败';
+      gp.className = 'pill off';
+    }
+    if (manual) toast('加载失败：' + e.message, true);
+  }
 }
 
 async function doBatchCheckin() {
@@ -361,49 +399,116 @@ async function doManualCheckin(file) {
 }
 
 async function copy(text, tip) {
-  try { await navigator.clipboard.writeText(text); toast(tip); }
-  catch (e) { toast('复制失败，请手动选择文本', true); }
+  if (!text) { toast('暂无可复制的内容', true); return; }
+  if (navigator.clipboard) {
+    try { await navigator.clipboard.writeText(text); toast(tip); return; }
+    catch { /* Fall back if the clipboard permission is not available. */ }
+  }
+  const oldFocus = document.activeElement;
+  const field = document.createElement('textarea');
+  field.value = text;
+  field.readOnly = true;
+  field.style.cssText = 'position:fixed;left:-10000px;top:0';
+  document.body.append(field);
+  try {
+    field.focus();
+    field.select();
+    if (document.execCommand('copy')) { toast(tip); return; }
+  } catch { /* The browser may disable clipboard access on LAN HTTP. */ }
+  finally { field.remove(); oldFocus?.focus(); }
+  window.prompt('浏览器未允许自动复制，请手动复制：', text);
 }
 
-$('#addBtn').onclick = () => { $('#modalBg').style.display = 'flex'; $('#loginArea').innerHTML =
-  '<div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div><div class="empty">点击上方按钮开始。二维码与登录链接只会显示在本地页面。</div>';
-  $('#startLoginBtn').onclick = startLogin; };
-$('#closeModalBtn').onclick = () => { if (pollTimer) clearInterval(pollTimer); $('#modalBg').style.display = 'none'; };
-$('#modalBg').onclick = (e) => { if (e.target === $('#modalBg')) $('#closeModalBtn').click(); };
-$('#refreshBtn').onclick = load;
-$('#checkinAllBtn').onclick = doBatchCheckin;
-$('#autoCheckinEnabled').onchange = e => saveAutoCheckin(e.target.checked);
-$('#copyProviderBtn').onclick = () => copy(JSON.stringify(summary.hermes.providerEntry, null, 2), 'provider JSON 已复制');
-$('#copyCmdBtn').onclick = () => copy(summary.hermes.configCommand, '配置命令已复制');
-$('#copyKeyBtn').onclick = async () => { try { copy((await api('/api/hermes/key')).apiKey, '完整 Key 已复制'); } catch(e){toast(e.message,true);} };
-$('#copyRefreshBtn').onclick = () => copy(
-  'cd ~/Documents/CodexProjects/WorkbuddyCCswitch && python3 scripts/refresh-hermes-models.py',
-  '模型刷新命令已复制');
+function resetLoginArea() {
+  $('#loginArea').innerHTML =
+    '<div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div><div class="empty">点击上方按钮开始。二维码与登录链接只会显示在本地页面。</div>';
+  $('#startLoginBtn').onclick = startLogin;
+}
+
+function showLoginProgress(sid, file, generation) {
+  clearTimeout(pollTimer);
+  $('#loginArea').innerHTML = `<div class="steps"><span class="step-num">1</span>用<b>目标微信号</b>扫描下方二维码</div>
+    <pre id="qrBox">正在生成二维码…</pre>
+    <div class="steps" style="margin-top:8px"><span class="step-num">2</span>如无法扫码，打开：<a id="loginLink" href="#" target="_blank" rel="noopener noreferrer">—</a></div>
+    <div class="bar"><button id="cancelLoginBtn" class="danger">取消</button><span class="spacer"></span><span class="file" id="loginFile">${esc(file)}</span></div>`;
+  const cancel = $('#cancelLoginBtn');
+  cancel.onclick = async () => {
+    cancel.disabled = true;
+    try { await post('/api/session/cancel', {sessionId:sid}); }
+    catch (e) { if (generation === loginGeneration) { cancel.disabled = false; toast(e.message, true); } }
+  };
+  const poll = async () => {
+    try {
+      const v = await api('/api/session?id=' + encodeURIComponent(sid));
+      if (generation !== loginGeneration) return;
+      if (v.status !== 'waiting') {
+        resetLoginArea();
+        if (v.credentialCreated) toast('登录完成，账号已写入凭据文件');
+        else if (cancel.disabled) toast('已取消登录');
+        else toast(v.status === 'expired' ? '登录已超时' : '登录进程结束，未检测到新凭据', true);
+        load();
+        return;
+      }
+      $('#qrBox').textContent = v.output || (cancel.disabled ? '正在取消…' : '正在生成二维码…');
+      const link = $('#loginLink');
+      link.href = v.loginUrl || '#';
+      link.textContent = v.loginUrl || '—';
+      pollTimer = setTimeout(poll, 1500);
+    } catch (e) {
+      if (generation !== loginGeneration) return;
+      $('#qrBox').textContent = '登录状态查询失败，请关闭后重新打开。';
+      toast(e.message, true);
+    }
+  };
+  poll();
+}
 
 async function startLogin() {
+  if (loginRequest) return;
+  const generation = loginGeneration;
   const btn = $('#startLoginBtn'); btn.disabled = true; btn.textContent = '正在生成…';
+  loginRequest = post('/api/accounts');
   try {
-    const s = await post('/api/accounts');
-    $('#loginArea').innerHTML = `<div class="steps"><span class="step-num">1</span>用<b>目标微信号</b>扫描下方二维码</div>
-      <pre id="qrBox">正在生成二维码…</pre>
-      <div class="steps" style="margin-top:8px"><span class="step-num">2</span>如无法扫码，打开：<a id="loginLink" href="#" target="_blank" rel="noopener">—</a></div>
-      <div class="bar"><button id="cancelLoginBtn" class="danger">取消</button><span class="spacer"></span><span class="file" id="loginFile">${esc(s.file)}</span></div>`;
-    $('#cancelLoginBtn').onclick = () => post('/api/session/cancel', {sessionId:s.sessionId}).then(()=>{clearInterval(pollTimer);toast('已取消');load();});
-    const poll = async () => {
-      try {
-        const v = await api('/api/session?id=' + encodeURIComponent(s.sessionId));
-        const box = $('#qrBox'); if (box) box.textContent = v.output || '正在生成二维码…';
-        const link = $('#loginLink'); if (link && v.loginUrl) { link.href = v.loginUrl; link.textContent = v.loginUrl; }
-        if (v.status === 'done') {
-          clearInterval(pollTimer);
-          toast(v.credentialCreated ? '登录完成，账号已写入凭据文件' : '登录进程结束，未检测到新凭据', !v.credentialCreated);
-          load();
-        }
-      } catch (e) { clearInterval(pollTimer); toast('登录状态查询失败：' + e.message, true); }
-    };
-    poll(); pollTimer = setInterval(poll, 1500);
-  } catch (e) { toast('无法开始登录：' + e.message, true); btn.disabled = false; btn.textContent = '生成登录二维码'; }
+    const s = await loginRequest;
+    if (generation === loginGeneration) showLoginProgress(s.sessionId, s.file, generation);
+  } catch (e) {
+    if (generation === loginGeneration) { toast('无法开始登录：' + e.message, true); resetLoginArea(); }
+  } finally { loginRequest = null; }
 }
+
+$('#addBtn').onclick = async () => {
+  const generation = ++loginGeneration;
+  clearTimeout(pollTimer);
+  $('#modalBg').style.display = 'flex';
+  $('#loginArea').textContent = '正在查询登录状态…';
+  if (loginRequest) await loginRequest.catch(() => {});
+  try {
+    const current = await api('/api/summary');
+    if (generation !== loginGeneration) return;
+    const sess = current.sessions?.find(x => x.status === 'waiting');
+    if (sess) showLoginProgress(sess.sessionId, sess.file, generation);
+    else resetLoginArea();
+  } catch (e) {
+    if (generation !== loginGeneration) return;
+    $('#loginArea').textContent = '无法查询登录状态，请关闭后重试。';
+    toast(e.message, true);
+  }
+};
+$('#closeModalBtn').onclick = () => {
+  ++loginGeneration;
+  clearTimeout(pollTimer);
+  $('#modalBg').style.display = 'none';
+  $('#loginArea').replaceChildren();
+};
+$('#modalBg').onclick = (e) => { if (e.target === $('#modalBg')) $('#closeModalBtn').click(); };
+$('#refreshBtn').onclick = () => load(true);
+$('#checkinAllBtn').onclick = doBatchCheckin;
+$('#autoCheckinEnabled').onchange = e => saveAutoCheckin(e.target.checked);
+$('#copyProviderBtn').onclick = () => copy(JSON.stringify(summary?.hermes.providerEntry, null, 2), 'provider JSON 已复制');
+$('#copyCmdBtn').onclick = () => copy(summary?.hermes.configCommand, '配置命令已复制');
+$('#copyKeyBtn').onclick = async () => { try { await copy((await api('/api/hermes/key')).apiKey, '完整 Key 已复制'); } catch(e){toast(e.message,true);} };
+$('#copyRefreshBtn').onclick = () => copy(summary?.hermes.refreshCommand, '模型刷新命令已复制（在本仓库目录执行）');
+$('#copyBridgeBtn').onclick = () => copy($('#bridgeUrl').textContent, '桥地址已复制');
 
 load();
 setInterval(load, 15000);

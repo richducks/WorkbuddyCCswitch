@@ -67,7 +67,10 @@ class Handler(BaseHTTPRequestHandler):
         size = int(self.headers.get("Content-Length") or 0)
         if size <= 0 or size > 1_000_000:
             raise ValueError("请求体为空或过大")
-        return json.loads(self.rfile.read(size).decode("utf-8"))
+        data = json.loads(self.rfile.read(size).decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+        return data
 
     def _guard(self) -> bool:
         if not self._require():

@@ -5,6 +5,7 @@ __pycache__
 *.pyc
 *.log
 .env
+config/config.json
 README.md
 scripts/selftest.py
 .DS_Store

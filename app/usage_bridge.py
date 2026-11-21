@@ -1,4 +1,8 @@
-"""Read-only loopback quota bridge for CC Switch. No route performs check-ins."""
+"""Read-only quota bridge for CC Switch.
+
+Binds inside the container; Compose publishes to loopback by default.
+No route performs check-ins.
+"""
 from __future__ import annotations
 
 import hmac

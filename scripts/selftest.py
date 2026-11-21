@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -11,7 +12,7 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 from usage_bridge import payload  # noqa: E402
-from checkin import candidates, queue, run_checkin, uid_key  # noqa: E402
+from checkin import candidates  # noqa: E402
 from controller import Controller, mask  # noqa: E402
 
 failures = []
@@ -62,40 +63,54 @@ check("bridge: stale snapshot disables success claim", "未确认" in stale["ent
 by_file = {Path(a["path"]).name: a for a in state["accounts"]}
 picked = candidates(by_file, list(by_file), today)
 check("checkin: only eligible account is queued", list(picked) == ["workbuddy2.json"])
-doc = {"schema": 1, "date": today, "plans": {picked["workbuddy2.json"]: {
-    "status": "missed", "attempts": 0, "lastAt": 0, "startupAt": 123}}}
-queue(doc, picked, today)
-p = doc["plans"][picked["workbuddy2.json"]]
-check("checkin: plan becomes pending", p["status"] == "pending")
-check("checkin: startupAt removed", "startupAt" not in p)
 try:
-    queue(doc, picked, today)
-    check("checkin: refuses double queue", False)
+    dup = {**by_file, "workbuddy4.json": {**by_file["workbuddy2.json"], "uid": "uid-B"}}
+    candidates(dup, list(dup), today)
+    check("checkin: duplicate uid refused", False)
 except ValueError:
-    check("checkin: refuses double queue", True)
+    check("checkin: duplicate uid refused", True)
 
 check("mask: never shows full key", mask("abcdefghijklmnopqrstuvwxyz") == "abcd***wxyz")
+
+
+class FakeProc:
+    def __init__(self, alive):
+        self._alive = alive
+        self.returncode = None if alive else 1
+
+    def poll(self):
+        return None if self._alive else 1
+
+
+def supervisor_restarts_crashed_child():
+    import controller as ctrl
+    gw = ctrl.Gateway.__new__(ctrl.Gateway)
+    gw.proc = FakeProc(False)
+    gw._log = None
+    gw._lock = threading.Lock()
+    gw._shutdown = False
+    spawned = []
+
+    def spawn():
+        spawned.append(1)
+        gw.proc = FakeProc(True)
+        gw._shutdown = True
+
+    gw._spawn = spawn
+    gw.supervise(poll_seconds=0.05)
+    return spawned
+
+
+check("gateway: supervisor restarts crashed child", supervisor_restarts_crashed_child() == [1])
 
 class FakeGW:
     def __init__(self, root):
         self.root = root
         self.version = "v1.14.47"
-        self.events = []
 
     def alive(self):
         return True
 
-    def stop(self):
-        self.events.append("stop")
-
-    def start(self):
-        self.events.append("start")
-        p = self.root / "checkin-state.json"
-        d = json.loads(p.read_text())
-        for row in d["plans"].values():
-            if row["status"] == "pending":
-                row.update(status="success", attempts=1, lastAt=int(time.time() * 1000) + 2000)
-        p.write_text(json.dumps(d))
 
 import controller as ctrl  # noqa: E402
 with tempfile.TemporaryDirectory() as td:
@@ -111,27 +126,7 @@ with tempfile.TemporaryDirectory() as td:
     (root / "config.json").write_text(json.dumps({"gateway": {"apiKey": "k" * 40}}))
     check("controller: hermes endpoint built", c.hermes()["endpoint"].endswith("/v1"))
     check("controller: key masked in view", "k" * 40 not in json.dumps(c.status(), ensure_ascii=False))
-
-    fake = FakeGW(root)
-    key = uid_key("uid-test")
-    (root / "workbuddy-status.json").write_text(json.dumps({
-        "updatedAt": int(time.time()),
-        "accounts": [{
-            "path": str(root / "workbuddy.json"), "edition": "cn", "state": "active",
-            "schedulingEnabled": True, "uid": "uid-test",
-            "checkin": {"date": today, "status": "missed", "attempts": 0, "lastAt": 0},
-        }],
-    }))
-    (root / "checkin-state.json").write_text(json.dumps({
-        "schema": 1, "date": today,
-        "plans": {key: {"status": "missed", "attempts": 0, "lastAt": 0}},
-    }))
-    for p in (root / "workbuddy-status.json", root / "checkin-state.json"):
-        p.chmod(0o600)
-    result = run_checkin(root, fake, ["workbuddy.json"], timeout=10)
-    check("checkin: end-to-end result reported", result.get("workbuddy.json") == "已签到")
-    check("checkin: gateway restarted exactly once", fake.events == ["stop", "start"])
-    check("checkin: original state backed up", bool(list((root / ".manual-checkin-backups").glob("*.json"))))
+    check("controller: failed catalog fetch cached briefly", c.model_catalog() == [])
 
 page = (APP / "static" / "index.html").read_text(encoding="utf-8")
 check("web: add-account button present", "添加微信账号" in page)

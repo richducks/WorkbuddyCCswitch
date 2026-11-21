@@ -59,7 +59,7 @@ python3 skill/scripts/deploy_workbuddy_ccswitch.py verify --dir ./WorkbuddyCCswi
 
 检查容器 healthy、网页对未认证请求返回 401。通过后：
 
-1. 浏览器打开 `http://127.0.0.1:<HOST_WEB_PORT>/`，用户名 `admin`，密码来自 `docker compose exec workbuddy-hermes cat /data/web/web.token`（在部署主机上执行）。
+1. 浏览器打开 `http://127.0.0.1:<HOST_WEB_PORT>/`（局域网模式改为配置的 `BIND_IP`），用户名 `admin`，密码来自 `docker compose exec workbuddy-hermes cat /data/web/web.token`（在部署主机上执行）。
 2. 「添加微信账号」→ 目标微信号本人扫码 → 凭据写入独立 JSON，网关热加载自动入池。
 3. 自动签到默认开启：北京时间 08:00–09:30 随机发起，失败 09:30–10:00 重试；网页可一键签到、按账号签到、开关自动签到。
 
@@ -75,7 +75,7 @@ python3 skill/scripts/deploy_workbuddy_ccswitch.py tunnel user@server --port 183
 
 ## 陷阱
 
-- **端口只绑 127.0.0.1**：compose 已固定 loopback，不要改成 `0.0.0.0` 发布；公网只经 HTTPS 反代暴露 `/v1/`。
+- **默认只绑 127.0.0.1**：仅在可信局域网按仓库 README 设置具体私有 `BIND_IP`；不要绑定 `0.0.0.0` 或公网，不可信网络用 SSH 隧道。仅在确有需要时经 HTTPS 反代 `/v1/`。
 - **web.token / 网关 apiKey / bridge token 互不相同**：迁移时用到哪份拷哪份；全新部署会生成全新的，Hermes 侧要同步换 `key_env`。
 - **两套实例不得共用同一批账号状态**：迁移 `data/gateway` + `data/web` 前先停旧实例，排除 `*.sock` 与日志，且按目标机用户修正 UID/GID。
 - healthcheck 的 `Basic` 字符串拼接、`accounts: null` 兼容、秒/毫秒时间戳兼容已在仓库代码内处理，不要"顺手简化"。

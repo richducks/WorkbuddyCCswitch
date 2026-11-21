@@ -23,7 +23,7 @@ import time
 import zipfile
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 REPO = "https://github.com/richducks/WorkbuddyCCswitch.git"
 BRANCH = "main"
@@ -99,33 +99,37 @@ def compose(repo_dir: Path, *args: str) -> str:
     return sh(["docker", "compose", *args], cwd=repo_dir, timeout=900)
 
 
-def env_value(repo_dir: Path, key: str) -> str:
-    env = repo_dir / ".env"
-    text = env.read_text() if env.exists() else (repo_dir / ".env.example").read_text()
-    for line in text.splitlines():
-        if line.strip().startswith(f"{key}="):
-            value = line.split("=", 1)[1].strip()
-            if value:
-                return value
-            break
-    fail(f".env 缺少 {key}，请从 .env.example 重新生成")
-
-
-def port_free(local_port: int) -> bool:
+def published_ports(repo_dir: Path) -> dict[int, tuple[str, int]]:
     try:
-        with socket.create_server(("127.0.0.1", local_port)):
+        service = json.loads(compose(repo_dir, "config", "--format", "json"))["services"]["workbuddy-hermes"]
+        host = service.get("environment", {}).get("HOST_BIND_IP", "127.0.0.1")
+        ports = {}
+        for row in service.get("ports", []):
+            target = row.get("target")
+            if target not in (8080, 8317, 8318) or row.get("protocol", "tcp") != "tcp":
+                continue
+            if not host or host == "0.0.0.0" or target in ports or row.get("host_ip") != host:
+                raise ValueError
+            ports[target] = (host, int(row["published"]))
+        if set(ports) == {8080, 8317, 8318}:
+            return ports
+    except (ValueError, TypeError, KeyError):
+        pass
+    fail("Compose 必须为网页、网关及用量桥各发布一个显式的 BIND_IP 地址和端口")
+
+
+def port_free(local_port: int, host: str = "127.0.0.1") -> bool:
+    try:
+        with socket.create_server((host, local_port)):
             return True
     except OSError:
         return False
 
 
-def require_ports_free(repo_dir: Path) -> None:
-    keys = ("HOST_WEB_PORT", "HOST_GW_PORT", "HOST_BRIDGE_PORT")
-    taken = [k for k in keys if not port_free(int(env_value(repo_dir, k)))]
+def require_ports_free(ports: dict[int, tuple[str, int]]) -> None:
+    taken = [f"{host}:{port}" for host, port in ports.values() if not port_free(port, host)]
     if taken:
-        fail("端口已被占用：" + ", ".join(
-            f"{k}={env_value(repo_dir, k)}" for k in taken) +
-            "；请在 .env 中改用空闲端口")
+        fail("地址不可绑定或端口已被占用：" + ", ".join(taken) + "；请检查 .env 中的 BIND_IP 和端口")
 
 
 # ---------------------------------------------------------------- deps ----
@@ -449,8 +453,8 @@ def cmd_deploy(args) -> None:
     if not (repo_dir / ".env").exists():
         shutil.copy(repo_dir / ".env.example", repo_dir / ".env")
         print("已从 .env.example 生成 .env；如需修改 UID/GID 或端口请先编辑")
-    compose(repo_dir, "config", "--quiet")
-    require_ports_free(repo_dir)
+    ports = published_ports(repo_dir)
+    require_ports_free(ports)
     print("Building image and starting stack")
     compose(repo_dir, "up", "-d", "--build")
     deadline = time.time() + 180
@@ -461,7 +465,8 @@ def cmd_deploy(args) -> None:
     else:
         fail("容器 180 秒内未进入 healthy；请运行 docker compose logs 查看原因")
     print(compose(repo_dir, "ps", "--format", "{{.Name}} {{.Status}}").strip())
-    print(f"管理网页：http://127.0.0.1:{env_value(repo_dir, 'HOST_WEB_PORT')}/"
+    web_host, web_port = ports[8080]
+    print(f"管理网页：http://{web_host}:{web_port}/"
           "（用户名 admin，密码在容器内 /data/web/web.token）")
     print("下一步：docker compose exec workbuddy-hermes cat /data/web/web.token 查看网页密码；"
           "再按 README 或 skill/references/remote-hermes.md 配置 Hermes 对接")
@@ -477,9 +482,10 @@ def cmd_verify(args) -> None:
     unhealthy = [line for line in rows if "(healthy)" not in line]
     if unhealthy:
         fail("容器状态异常：" + "；".join(unhealthy))
-    web = int(env_value(repo_dir, "HOST_WEB_PORT"))
+    web_host, web_port = published_ports(repo_dir)[8080]
     try:
-        urlopen(f"http://127.0.0.1:{web}/api/providers", timeout=5)
+        with build_opener(ProxyHandler({})).open(f"http://{web_host}:{web_port}/api/providers", timeout=5):
+            pass
     except HTTPError as e:
         if e.code != 401:
             fail(f"console check failed: HTTP {e.code}")
@@ -487,7 +493,7 @@ def cmd_verify(args) -> None:
         fail(f"console check failed: {e}")
     else:
         fail("网页未要求鉴权——配置异常，请检查 .env 与 compose")
-    print(f"PASS: 容器 healthy，网页 {web} 鉴权正常（401 for unauthenticated）")
+    print(f"PASS: 容器 healthy，网页 {web_host}:{web_port} 鉴权正常（401 for unauthenticated）")
 
 
 def cmd_tunnel(args) -> None:

@@ -1,8 +1,9 @@
-"""Manual check-in queue for WorkBuddy Gateway v1.14.47 (Docker-adapted).
+"""Shared helpers for gateway state snapshots and manual check-in eligibility.
 
-Mirrors the safety rules of the workbuddy-ccswitch-checkin skill, but controls a
-child process managed by this container instead of a systemd user unit. No
-upstream manual check-in API exists in v1.14.47; this queues one startup attempt.
+The web console reads the gateway's status snapshot, decides which accounts are
+eligible for one manual attempt, and performs the attempt through the gateway's
+private Unix control socket (see manual_checkin.py). It never rewrites gateway
+state files itself.
 """
 from __future__ import annotations
 
@@ -95,22 +96,6 @@ def candidates(rows: dict[str, dict], names: list[str], today: str) -> dict[str,
     return result
 
 
-def queue(doc: dict, selected: dict[str, str], today: str) -> None:
-    if doc.get("schema") != 1 or doc.get("date") != today or not isinstance(doc.get("plans"), dict):
-        raise ValueError("签到记录日期或格式不匹配")
-    plans = doc["plans"]
-    if any(p.get("status") in ("pending", "running") for p in plans.values()):
-        raise ValueError("仍有签到排队或正在进行；不启动另一轮补签")
-    for key in selected.values():
-        p = plans.get(key) or {}
-        if p.get("status") != "missed" or p.get("attempts") != 0 or p.get("lastAt", 0) != 0:
-            raise ValueError("权威记录已变化或已尝试，不执行")
-    for key in selected.values():
-        p = plans[key]
-        p.update(status="pending", message="用户请求手动补签")
-        p.pop("startupAt", None)
-
-
 @contextmanager
 def lock(root: Path):
     fd = os.open(root / ".manual-checkin.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -124,59 +109,3 @@ def lock(root: Path):
         yield
     finally:
         os.close(fd)
-
-
-def _poll(path: Path, selected: dict[str, str], today: str, earliest_ms: int, timeout: int) -> dict[str, str]:
-    end = time.monotonic() + timeout
-    pending = dict(selected)
-    results: dict[str, str] = {}
-    while pending and time.monotonic() < end and day() == today:
-        doc = json.loads(read_private(path))
-        if doc.get("date") != today:
-            break
-        for name, key in list(pending.items()):
-            rec = doc.get("plans", {}).get(key, {})
-            if rec.get("attempts") == 1 and rec.get("lastAt", 0) >= earliest_ms and rec.get("status") in ("success", "failed"):
-                results[name] = rec["status"]
-                del pending[name]
-        if pending:
-            time.sleep(2)
-    return results
-
-
-def run_checkin(root: Path, gateway, names: list[str], timeout: int = 180) -> dict[str, str]:
-    """Queue one attempt for eligible accounts, restarting the gateway child.
-
-    `gateway` must expose stop(), start() and alive(). Returns file -> status.
-    """
-    state = root / "checkin-state.json"
-    with lock(root):
-        rows = snapshot(root)  # freshness check before the interruption
-        if not set(names) <= rows.keys():
-            raise ValueError("选中的凭据文件名不在快照中")
-        today = day()
-        selected = candidates(rows, names, today)
-        if not selected:
-            return {}
-        now = datetime.now(BJ)
-        if day() != today or now.hour < 8 or (now.hour == 23 and now.minute >= 50):
-            raise ValueError("仅在同一北京时间日期的 08:00–23:50 内执行")
-        raw = read_private(state)
-        queue(json.loads(raw), selected, today)  # preflight
-        backups = root / ".manual-checkin-backups"
-        backups.mkdir(mode=0o700, exist_ok=True)
-        gateway.stop()
-        try:
-            raw2 = read_private(state)
-            if day() != today:
-                raise ValueError("北京时间已跨日，未修改记录")
-            doc = json.loads(raw2)
-            queue(doc, selected, today)
-            backup = backups / f"{today}-{time.time_ns()}.json"
-            atomic(backup, raw2)
-            atomic(state, json.dumps(doc, ensure_ascii=False).encode())
-        finally:
-            earliest = time.time_ns() // 1_000_000
-            gateway.start()
-        results = _poll(state, selected, today, earliest, timeout)
-    return {name: LABELS.get(results.get(name, ""), "尚未确认，请稍后只读查询") for name in selected}

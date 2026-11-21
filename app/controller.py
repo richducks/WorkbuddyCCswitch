@@ -9,13 +9,15 @@ import json
 import os
 import re
 import secrets
-import signal
+import shlex
 import stat
 import subprocess
 import threading
 import time
 import urllib.request
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 
 from checkin import LABELS as CHECKIN_LABELS, atomic, candidates, day, lock, snapshot
@@ -27,6 +29,16 @@ ROOT = Path(os.environ.get("GW_ROOT", "/data/gateway"))
 WEB_DATA = Path(os.environ.get("WEB_DATA", "/data/web"))
 BIN = Path(os.environ.get("GW_BIN", "/app/bin/workbuddy-gateway"))
 GW_PORT = int(os.environ.get("GW_PORT", "8317"))
+
+
+def bind_ip(value: str) -> str:
+    addr = IPv4Address(value)
+    if addr.is_loopback or any(addr in IPv4Network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
+        return str(addr)
+    raise ValueError("BIND_IP 必须是回环或专用局域网 IPv4 地址，不能是 0.0.0.0 或公网地址")
+
+
+HOST_BIND_IP = bind_ip(os.environ.get("HOST_BIND_IP", "127.0.0.1"))
 HOST_GW_PORT = int(os.environ.get("HOST_GW_PORT", str(GW_PORT)))
 BRIDGE_PORT = int(os.environ.get("BRIDGE_PORT", "8318"))
 HOST_BRIDGE_PORT = int(os.environ.get("HOST_BRIDGE_PORT", str(BRIDGE_PORT)))
@@ -56,12 +68,13 @@ def mask(value: str) -> str:
 
 
 class Gateway:
-    """Owns the single `serve` child process so check-in can restart it safely."""
+    """Owns the single `serve` child process; a supervisor restarts it on crash."""
 
     def __init__(self) -> None:
         self.proc: subprocess.Popen | None = None
         self._log = None
         self._lock = threading.Lock()
+        self._shutdown = False
         self.version = "unknown"
         try:
             out = subprocess.run([str(BIN), "version"], cwd=ROOT, capture_output=True,
@@ -70,29 +83,64 @@ class Gateway:
         except Exception:
             pass
 
+    def _close_log(self) -> None:
+        if self._log:
+            try:
+                self._log.close()
+            except OSError:
+                pass
+            self._log = None
+
+    def _spawn(self) -> None:
+        self._close_log()
+        (ROOT / "logs").mkdir(mode=0o700, exist_ok=True)
+        self._log = (ROOT / "logs" / "stdout.log").open("a", buffering=1)
+        env = {**os.environ, "WB_MANUAL_CHECKIN_SOCKET": str(WEB_DATA / "manual-checkin.sock"),
+               "WB_AUTO_CHECKIN_DISABLED_FILE": str(WEB_DATA / AUTO_DISABLED_FILE)}
+        preserve = WEB_DATA / ".preserve-checkin-once"
+        try:
+            preserve.unlink()
+        except FileNotFoundError:
+            pass
+        else:
+            env["WB_PRESERVE_CHECKIN_SCHEDULE"] = "1"
+        self.proc = subprocess.Popen(
+            [str(BIN), "serve", "-addr", "0.0.0.0", "-port", str(GW_PORT)],
+            cwd=ROOT, stdout=self._log, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, env=env,
+        )
+
     def start(self) -> None:
         with self._lock:
             if self.proc is not None and self.proc.poll() is None:
                 return
-            (ROOT / "logs").mkdir(mode=0o700, exist_ok=True)
-            self._log = (ROOT / "logs" / "stdout.log").open("a", buffering=1)
-            env = {**os.environ, "WB_MANUAL_CHECKIN_SOCKET": str(WEB_DATA / "manual-checkin.sock"),
-                   "WB_AUTO_CHECKIN_DISABLED_FILE": str(WEB_DATA / AUTO_DISABLED_FILE)}
-            preserve = WEB_DATA / ".preserve-checkin-once"
-            try:
-                preserve.unlink()
-            except FileNotFoundError:
-                pass
-            else:
-                env["WB_PRESERVE_CHECKIN_SCHEDULE"] = "1"
-            self.proc = subprocess.Popen(
-                [str(BIN), "serve", "-addr", "0.0.0.0", "-port", str(GW_PORT)],
-                cwd=ROOT, stdout=self._log, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, env=env,
-            )
+            self._spawn()
+
+    def supervise(self, poll_seconds: int = 5) -> None:
+        """Restart the gateway child if it dies; back off if restarts keep failing."""
+        delay = poll_seconds
+        while not self._shutdown:
+            time.sleep(delay)
+            if self._shutdown:
+                break
+            with self._lock:
+                if self._shutdown:
+                    return
+                if self.proc is None or self.proc.poll() is None:
+                    delay = poll_seconds
+                    continue
+                print(f"[boot] 网关进程意外退出（退出码 {self.proc.returncode}），正在重启", flush=True)
+                try:
+                    self._spawn()
+                except OSError as exc:
+                    self._close_log()
+                    print(f"[boot] 网关重启失败：{type(exc).__name__}: {exc}", flush=True)
+                # A successful Popen is not recovery; reset only after a live poll.
+                delay = min(delay * 2, max(poll_seconds, 30))
 
     def stop(self, timeout: int = 20) -> None:
         with self._lock:
+            self._shutdown = True
             proc, self.proc = self.proc, None
             if proc is None:
                 return
@@ -103,27 +151,26 @@ class Gateway:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=10)
-            if self._log:
-                self._log.close()
-                self._log = None
+            self._close_log()
 
     def alive(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+        proc = self.proc
+        return proc is not None and proc.poll() is None
 
     def shutdown(self) -> None:
         self.stop()
 
 
 class LoginSession:
-    def __init__(self, sid: str, filename: str, proc: subprocess.Popen, log_path: Path):
+    def __init__(self, sid: str, filename: str, proc: subprocess.Popen):
         self.sid = sid
         self.filename = filename
         self.proc = proc
-        self.log_path = log_path
-        self.started = time.time()
+        self.started = time.monotonic()
+        self.finished_at: float | None = None
+        self.output: deque[str] = deque(maxlen=40)
         self.url = ""
-        self.done = False
-        self.returncode: int | None = None
+        self.stopping = False
 
 
 class Controller:
@@ -132,27 +179,35 @@ class Controller:
         self.sessions: dict[str, LoginSession] = {}
         self._sessions_lock = threading.RLock()
         self._login_lock = threading.Lock()
+        self._labels_lock = threading.Lock()
         self.labels_path = WEB_DATA / "labels.json"
         self.provider_registry = ProviderRegistry(WEB_DATA / "providers.json")
         self._catalog: list[dict] = []
-        self._catalog_at = 0.0
+        self._catalog_refresh_at = 0.0
+        self._catalog_fetching = False
         self._catalog_lock = threading.Lock()
 
     # ---------- labels / presentation ----------
-    def labels(self) -> dict[str, str]:
+    def _read_labels(self) -> dict[str, str]:
         try:
             data = json.loads(private_read(self.labels_path))
-            return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(data, dict) else {}
+            return ({k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+                    if isinstance(data, dict) else {})
         except (OSError, ValueError):
             return {}
+
+    def labels(self) -> dict[str, str]:
+        with self._labels_lock:
+            return self._read_labels()
 
     def set_label(self, filename: str, label: str) -> None:
         if not FILE_RE.match(filename) or not label.strip():
             raise ValueError("文件名或标签无效")
         label = re.sub(r"[\x00-\x1f\x7f]", "", label).strip()[:32]
-        data = self.labels()
-        data[filename] = label
-        private_write(self.labels_path, json.dumps(data, ensure_ascii=False))
+        with self._labels_lock:
+            data = self._read_labels()
+            data[filename] = label
+            private_write(self.labels_path, json.dumps(data, ensure_ascii=False))
 
     def alias(self, filename: str, index: int) -> str:
         return self.labels().get(filename) or f"账号 {index} · {filename}"
@@ -216,7 +271,8 @@ class Controller:
                 "manualEligible": bool(manual_available and current and c.get("manualReady") is True),
             })
         with self._sessions_lock:
-            sessions = [self._session_view(s) for s in self.sessions.values()]
+            self._prune_sessions()
+            sessions = [self._session_view(s, include_output=False) for s in self.sessions.values()]
         return {
             "now": datetime.now(BJ).strftime("%Y-%m-%d %H:%M:%S CST"),
             "version": self.gateway.version,
@@ -228,6 +284,7 @@ class Controller:
             "hermes": self.hermes(),
             "modelCatalog": self.model_catalog(),
             "bridgePort": HOST_BRIDGE_PORT,
+            "bridgeUrl": f"http://{HOST_BIND_IP}:{HOST_BRIDGE_PORT}",
         }
 
     # ---------- accounts ----------
@@ -239,22 +296,28 @@ class Controller:
             n += 1
         return f"workbuddy{n}.json"
 
+    def _prune_sessions(self) -> None:
+        """Drop completed sessions after an hour. Caller holds _sessions_lock."""
+        cutoff = time.monotonic() - 3600
+        for sid in [sid for sid, s in self.sessions.items() if s.finished_at is not None and s.finished_at < cutoff]:
+            del self.sessions[sid]
+
     def add_account(self) -> dict:
         if not self._login_lock.acquire(blocking=False):
             raise ValueError("已有登录会话在进行，请等待完成或取消后再试")
         try:
+            with self._sessions_lock:
+                self._prune_sessions()
+                if any(s.finished_at is None for s in self.sessions.values()):
+                    raise ValueError("已有登录会话在进行，请等待完成或取消后再试")
             filename = self.next_filename()
             sid = secrets.token_hex(6)
-            log_path = WEB_DATA / f"login-{filename}.log"
-            if log_path.exists():
-                log_path.unlink()
-            private_write(log_path, "")
             proc = subprocess.Popen(
                 [str(BIN), "login", "-auth", filename],
                 cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, stdin=subprocess.DEVNULL,
             )
-            session = LoginSession(sid, filename, proc, log_path)
+            session = LoginSession(sid, filename, proc)
             with self._sessions_lock:
                 self.sessions[sid] = session
             threading.Thread(target=self._pump, args=(session,), daemon=True).start()
@@ -263,50 +326,53 @@ class Controller:
             self._login_lock.release()
 
     def _pump(self, s: LoginSession) -> None:
-        buf: list[str] = []
         try:
             assert s.proc.stdout is not None
-            for line in s.proc.stdout:
-                buf.append(line.rstrip("\r\n"))
-                if len(buf) > 120:
-                    buf.pop(0)
-                # strip ANSI colour but keep the QR block (box-drawing chars)
-                clean = re.sub(r"\x1b\[[0-9;]*m", "", "".join(line))
-                with open(s.log_path, "a", encoding="utf-8") as f:
-                    f.write(clean)
-                if not s.url:
-                    m = URL_RE.search(clean)
-                    if m:
-                        s.url = m.group(0).rstrip(".,;)")
-        except Exception:
+            with s.proc.stdout as output:
+                for line in output:
+                    # Keep a bounded QR preview in memory, never in a shared log file.
+                    clean = re.sub(r"\x1b\[[0-9;]*m", "", line[:4096]).rstrip("\r\n")
+                    with self._sessions_lock:
+                        if s.stopping:
+                            continue
+                        if "[日志脱敏]" not in clean and "[Log]" not in clean:
+                            s.output.append(clean)
+                        if not s.url and (m := URL_RE.search(clean)):
+                            s.url = m.group(0).rstrip(".,;)")
+        except (OSError, UnicodeError):
             pass
         finally:
             if s.proc.poll() is None:
                 try:
-                    s.proc.terminate()
-                    s.proc.wait(timeout=10)
+                    s.proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    s.proc.kill()
-            s.returncode = s.proc.returncode
-            s.done = True
-            with open(s.log_path, "a", encoding="utf-8") as f:
-                f.write(f"\n[登录进程结束，退出码 {s.returncode}]\n")
+                    s.proc.terminate()
+                    try:
+                        s.proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        s.proc.kill()
+                        s.proc.wait()
+            with self._sessions_lock:
+                s.output.clear()
+                s.url = ""
+                s.finished_at = time.monotonic()
 
-    def _session_view(self, s: LoginSession) -> dict:
-        expired = time.time() - s.started > LOGIN_TIMEOUT
-        if expired and not s.done and s.proc.poll() is None:
-            s.proc.terminate()
-        try:
-            text = private_read(s.log_path)
-        except OSError:
-            text = ""
-        # Keep the terminal QR block, trim long audit log lines.
-        lines = [ln for ln in text.splitlines() if "[日志脱敏]" not in ln and "[Log]" not in ln]
-        tail = "\n".join(lines[-40:])
-        status = "done" if s.done else ("expired" if expired else "waiting")
+    def _stop_login(self, s: LoginSession) -> None:
+        if s.finished_at is None and not s.stopping:
+            s.stopping = True
+            if s.proc.poll() is None:
+                s.proc.terminate()
+
+    def _session_view(self, s: LoginSession, *, include_output: bool = True) -> dict:
+        expired = time.monotonic() - s.started > LOGIN_TIMEOUT
+        if expired:
+            self._stop_login(s)
+        done = s.finished_at is not None
+        status = "done" if done else ("expired" if expired else "waiting")
+        show_output = include_output and not done and not s.stopping
         return {
             "sessionId": s.sid, "file": s.filename, "status": status,
-            "loginUrl": s.url, "output": tail,
+            "loginUrl": s.url if show_output else "", "output": "\n".join(s.output) if show_output else "",
             "credentialCreated": (ROOT / s.filename).exists(),
         }
 
@@ -320,9 +386,8 @@ class Controller:
     def cancel_session(self, sid: str) -> None:
         with self._sessions_lock:
             s = self.sessions.get(sid)
-            if s and not s.done:
-                s.proc.terminate()
-                s.done = True
+            if s is not None:
+                self._stop_login(s)
 
     def remove_account(self, filename: str) -> None:
         if not FILE_RE.match(filename):
@@ -385,37 +450,54 @@ class Controller:
             return results
 
     # ---------- model catalog (future models are picked up automatically) ----------
-    def model_catalog(self) -> list[dict]:
-        with self._catalog_lock:
-            if self._catalog and time.time() - self._catalog_at < 300:
-                return self._catalog
+    def _fetch_catalog(self) -> list[dict]:
+        try:
             key = self.api_key()
             if not key:
+                return []
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{GW_PORT}/v1/models",
+                headers={"Authorization": "Bearer " + key},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                doc = json.load(resp)
+        except (OSError, ValueError, TypeError):
+            return []
+        data = doc.get("data") if isinstance(doc, dict) else None
+        if not isinstance(data, list):
+            return []
+        rows = []
+        for item in data:
+            mid = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(mid, str) or not mid:
+                continue
+            sites = item.get("capabilities_by_site")
+            cn = sites.get("cn") if isinstance(sites, dict) else None
+            caps = cn if isinstance(cn, dict) else {}
+            row: dict[str, object] = {"id": mid}
+            for field in ("context_length", "max_output_tokens"):
+                value = caps.get(field, item.get(field, item.get("default_" + field)))
+                if type(value) is int and value > 0:
+                    row[field] = value
+            rows.append(row)
+        return rows
+
+    def model_catalog(self) -> list[dict]:
+        with self._catalog_lock:
+            if self._catalog_fetching or time.monotonic() < self._catalog_refresh_at:
                 return self._catalog
-            try:
-                req = urllib.request.Request(
-                    f"http://127.0.0.1:{GW_PORT}/v1/models",
-                    headers={"Authorization": "Bearer " + key},
-                )
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = json.loads(resp.read().decode()).get("data") or []
-                rows = []
-                for item in data:
-                    mid = item.get("id")
-                    if not isinstance(mid, str) or not mid:
-                        continue
-                    caps = ((item.get("capabilities_by_site") or {}).get("cn") or {})
-                    row: dict[str, object] = {"id": mid}
-                    for field in ("context_length", "max_output_tokens"):
-                        value = caps.get(field, item.get(field, item.get("default_" + field)))
-                        if isinstance(value, int) and value > 0:
-                            row[field] = value
-                    rows.append(row)
+            self._catalog_fetching = True
+        rows = []
+        try:
+            rows = self._fetch_catalog()
+        finally:
+            with self._catalog_lock:
                 if rows:
-                    self._catalog, self._catalog_at = rows, time.time()
-            except (OSError, ValueError, TypeError):
-                pass
-            return self._catalog
+                    self._catalog = rows
+                self._catalog_refresh_at = time.monotonic() + (300 if rows else 30)
+                self._catalog_fetching = False
+                cached = self._catalog
+        return cached
 
     # ---------- Hermes wiring ----------
     def hermes(self) -> dict:
@@ -427,7 +509,7 @@ class Controller:
             pass
         entry: dict[str, object] = {
             "name": "WorkBuddy Gateway",
-            "base_url": f"http://127.0.0.1:{HOST_GW_PORT}/v1",
+            "base_url": f"http://{HOST_BIND_IP}:{HOST_GW_PORT}/v1",
             "default_model": "hy3",
             "transport": "chat_completions",
             "key_env": "WORKBUDDY_GATEWAY_API_KEY",
@@ -441,7 +523,8 @@ class Controller:
             "keyMasked": mask(key),
             "hasKey": bool(key),
             "providerEntry": entry,
-            "configCommand": "hermes config set --force providers.workbuddy '" + json.dumps(entry) + "'",
+            "configCommand": shlex.join(["hermes", "config", "set", "--force", "providers.workbuddy", json.dumps(entry)]),
+            "refreshCommand": f"python3 scripts/refresh-hermes-models.py --gateway-host {HOST_BIND_IP} --gateway-port {HOST_GW_PORT}",
             "envVar": "WORKBUDDY_GATEWAY_API_KEY",
         }
 
