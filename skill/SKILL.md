@@ -25,6 +25,8 @@ metadata:
 
 ## 部署（一条命令）
 
+脚本位置：安装为技能后用技能目录下的 `scripts/deploy_workbuddy_ccswitch.py`；在仓库内直接用时为 `skill/scripts/deploy_workbuddy_ccswitch.py`。下文命令以仓库内路径示意。
+
 ```bash
 python3 skill/scripts/deploy_workbuddy_ccswitch.py deploy --dir ./WorkbuddyCCswitch
 ```
