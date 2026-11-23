@@ -3,3 +3,8 @@
 
 # Prevent CRLF checkout from corrupting the unified patch on Windows.
 *.patch text eol=lf
+
+# 容器里 COPY 的 shell 脚本必须保持 LF：Windows 检出若带 CRLF，shebang 变成 "#!/bin/sh"，容器启动即报
+# exec /usr/local/bin/docker-entrypoint.sh: no such file or directory。
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
