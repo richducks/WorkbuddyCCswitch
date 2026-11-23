@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checkin import atomic
 from controller import BRIDGE_PORT, HOST_BIND_IP, ROOT, WEB_DATA, Controller, Gateway, private_read, private_write
 from usage_bridge import build_server
+import notify
 
 TEMPLATE = Path(os.environ.get("CONFIG_TEMPLATE", "/app/config/config.json.example"))
 WEB_TOKEN = WEB_DATA / "web.token"
@@ -71,6 +72,25 @@ def init() -> tuple[str, str]:
     return web_token, bridge_token
 
 
+def start_notify(controller: Controller) -> None:
+    """Optional webhook alerts; off unless WB_NOTIFY_WEBHOOK is set."""
+    url = os.environ.get("WB_NOTIFY_WEBHOOK", "").strip()
+    if not url:
+        return
+    kind = os.environ.get("WB_NOTIFY_KIND", "generic").strip().lower()
+    if kind not in notify.KINDS:
+        print(f"[notify] 未知的 WB_NOTIFY_KIND={kind}，改用 generic", flush=True)
+        kind = "generic"
+    try:
+        interval = max(60, int(float(os.environ.get("WB_NOTIFY_INTERVAL", "900"))))
+    except ValueError:
+        interval = 900
+    # The webhook URL can embed a token, so it is never printed.
+    print(f"[notify] 已启用提醒（{kind}，每 {interval} 秒检查一次）", flush=True)
+    threading.Thread(target=notify.run, name="notify", daemon=True,
+                     args=(controller, WEB_DATA / notify.STATE_FILE, url, kind, interval)).start()
+
+
 def main() -> None:
     web_token, bridge_token = init()
     gateway = Gateway()
@@ -78,6 +98,7 @@ def main() -> None:
     gateway.start()
     threading.Thread(target=gateway.supervise, daemon=True, name="gateway-supervisor").start()
     print(f"[boot] gateway {gateway.version} started (supervisor active)", flush=True)
+    start_notify(controller)
 
     bridge = build_server(BRIDGE_PORT, ROOT / "workbuddy-status.json", bridge_token.encode())
     threading.Thread(target=bridge.serve_forever, daemon=True, name="quota-bridge").start()

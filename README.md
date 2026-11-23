@@ -46,7 +46,7 @@ docker compose ps
 
 `scripts/backup-current.sh` 与 `scripts/rollback.sh` 是 bash 脚本（备份、回滚 systemd 旧方案），仅 Linux/macOS 可直接运行，Windows 用户请在 WSL2 中执行或手动复制 `data/`。
 
-默认管理网页为 `http://127.0.0.1:8080/`，用户名 `admin`。首次启动生成的网页登录密码保存在私有文件 `data/web/web.token`；网关 API Key 和 CC Switch 用量 token 是另外两份凭据。
+默认管理网页为 `http://127.0.0.1:8080/`，打开后先进入 `/login` 登录页，输入控制台密码（首次启动生成的私有文件 `data/web/web.token` 的内容）。会话默认 12 小时，右上角可「退出登录」；脚本仍可用 `curl -u admin:<token>`。网关 API Key 和 CC Switch 用量 token 是另外两份凭据。
 
 **可信局域网直接访问（可选，优先用 SSH 隧道）**：在 `.env` 中将 `BIND_IP` 改为 Docker 宿主机的具体私有 IPv4 地址，再运行 `docker compose up -d --build`。不支持 `0.0.0.0` 或公网地址。三个端口按配置发布到同一个地址：
 
@@ -83,8 +83,10 @@ ssh -NT -o ExitOnForwardFailure=yes \
 
 | 区域 | 内容 |
 |---|---|
-| 模型提供商 | WorkBuddy 作为内置项；其他服务可新增、编辑、移除接入预设，并导出命名的 Hermes 配置命令 |
-| 微信账号池 | 逐号显示凭据文件名、可自定义备注、加载状态、额度、今日签到徽章（已签到 / 未签到 / 签到失败 / 待签到）、最近签到时间 |
+| 登录与鉴权 | `/login` 表单页输入控制台密码（`data/web/web.token`），成功后写入 `wb_session` 会话 cookie（HttpOnly、SameSite=Strict、默认 12 小时）与可读的 `wb_csrf`；未认证访问页面 303 跳登录页、访问 API 返回 401；写操作额外校验 `X-CSRF-Token` 与同源；失败登录固定延迟 0.4s。脚本仍可用 `curl -u admin:<token>`（Basic Auth）直接调用 |
+| 侧边栏导航 | 三组：账号与签到 → 模型接入 → 用量与状态；首个导航项即默认页；≤920px 折叠为可横向滚动的 chips |
+| 微信账号池 | 逐号显示凭据文件名、可自定义备注、加载状态、额度、积分到期时间（≤3 天高亮）、今日签到徽章（已签到 / 未签到 / 签到失败 / 待签到）、最近签到时间 |
+| 积分到期汇总 | 账号与签到页顶部的汇总条：7 天内到期积分总量与账号数，另标出 3 天内的部分和最早到期日；数据来自网关权益快照的 `quotaExpireAt` |
 | 添加微信账号 | 点击后容器执行 `login -auth workbuddyN.json`，网页实时显示终端二维码和备用登录链接；本人用目标微信号扫码授权，凭据写入独立文件，网关热加载自动加入账号池 |
 | 一键签到 / 单号签到 | 处理尚未尝试的待签或漏签国内个人账号；批量逐个执行并显示各账号结果。跳过已签到、已尝试或正在签到的账号；无需重启网关。 |
 | 自动签到 | 网页开关默认开启，保存后立即生效并在容器重启后保留。关闭只暂停尚未开始的自动尝试，不影响手动签到。每个账号显示当天的计划签到或重试时间，以及最近实际尝试时间（北京时间）。 |
@@ -92,6 +94,16 @@ ssh -NT -o ExitOnForwardFailure=yes \
 | Hermes 对接 | 显示 `base_url`、默认模型、脱敏 API Key；可复制 provider JSON、配置命令和完整 Key |
 | 模型目录 | 自动从网关 `/v1/models` 读取全部模型（含上下文/输出上限）；复制的 provider JSON 已含全量模型；新增模型后可一键复制刷新命令同步到宿主机 Hermes |
 | 用量桥 | 显示 CC Switch 应填写的 Base URL；用量刷新只读，不触发签到 |
+| 模型提供商（暂隐藏） | 预设数据层与 `/api/providers` 接口保留，卡片在页面上暂时 `hidden`（评审意见「暂不做拓展」）；恢复入口时去掉 `hidden` 与导航注释即可 |
+
+## 提醒（可选）
+
+设置 `WB_NOTIFY_WEBHOOK` 后，容器每 `WB_NOTIFY_INTERVAL` 秒（默认 900）检查一次状态快照，命中以下条件时 POST 一条文本消息：
+
+- 某账号**今日签到失败**（每天每个账号只提醒一次）；
+- 某账号**积分在 3 天内到期**且仍有余额（每个到期日只提醒一次）。
+
+`WB_NOTIFY_KIND` 决定消息封装：`generic`（默认，`{"source","text"}`）、`telegram`（`{"text":…}`，URL 用 Bot API 的 `sendMessage` 地址）、`dingtalk`、`feishu`。去重状态保存在 `data/web/notify-state.json`（0600，30 天后自动过期）；投递失败不会记为已提醒，下一轮会重试，且**不会影响签到或控制台**。webhook URL 通常自带 token，因此不会出现在日志里。
 
 ## 备份与迁移
 
@@ -100,10 +112,37 @@ ssh -NT -o ExitOnForwardFailure=yes \
 恢复备份时请复制为独立文件，不要创建指向备份的硬链接。容器启动会调整已恢复的目录和单链接普通文件的属主，不会跟随符号链接或更改多链接文件的属主。
 
 ```bash
-bash scripts/backup-current.sh      # 本机私有备份，不上传 Git
+bash scripts/backup-current.sh                     # 本机私有备份（默认保留 7 份）
+bash scripts/backup-current.sh --keep 14           # 只保留最近 14 份（0 = 不清理）
+bash scripts/backup-current.sh --backup-dir /mnt/backup --keep 30
+```
+
+脚本以时间戳目录保存 `data/gateway`、`data/web`、Hermes 配置、CC Switch 数据库与 systemd unit，生成 `SHA256SUMS` 便于核对，权限 700/0600，不跟随符号链接。定时执行示例（`crontab -e`）：
+
+```cron
+10 3 * * * cd /path/to/WorkbuddyCCswitch && bash scripts/backup-current.sh --keep 14 >> backup.log 2>&1
 ```
 
 `scripts/rollback.sh` 仅适用于原本就运行了旧版 systemd 网关和用量桥的机器，不是新安装的通用回滚方式。
+
+## 上游升级检查
+
+镜像钉住上游 `v1.14.47`（提交也固定），两个补丁与上游源码强耦合。`scripts/check_upstream.py` 把「要不要升级、补丁还行不行」变成一条命令：
+
+```bash
+python3 scripts/check_upstream.py                       # 在线查上游是否发布了更新的 tag
+python3 scripts/check_upstream.py --local ../workbuddy-gateway   # 对本地源码试打两个补丁
+python3 scripts/check_upstream.py --report /tmp/upgrade.md       # 加 --report 存成 Markdown
+```
+
+`--local` 要求传入 `git clone` 的上游源码目录；脚本会核对 HEAD、用 `git apply --check` 逐个试打补丁，并输出升级检查单（`checkin.go` 签到执行器、`main.go` 选号层级、状态快照字段、Go 单测、容器冒烟）。补丁冲突时退出码为 1。升级完成后同步修改 `scripts/build_gateway.py` 的 `TAG` 与 `REVISION`。
+
+## HTTPS（评估结论）
+
+当前三个端口都是明文 HTTP，默认只发布到 `127.0.0.1`，跨机器访问走 SSH 隧道，因此仓库**没有**内置 TLS。可选的两种做法：
+
+1. **SSH 隧道（默认推荐）**：不改任何容器配置，见上文 `ssh -L` 示例；客户端只看到 `127.0.0.1`。
+2. **可信局域网 + 反代**：在 Docker 主机上另起一个 Caddy/Nginx，把 8080 暴露为 HTTPS 并转发到 `127.0.0.1:8080`，同时把 `.env` 的 `BIND_IP` 保持回环，只发布反代端口。用自签证书时浏览器会有告警；用内网 CA 或真实域名证书更妥当。网关（8317）与用量桥（8318）同样是明文，是否需要一并加 TLS 取决于你是否只从回环访问它们。
 
 WorkBuddy 本身的模型目录在网关更新后刷新。若宿主机 Hermes 配置也要同步 WorkBuddy 的新模型：
 
@@ -138,44 +177,55 @@ python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 p
 ## 验证
 
 ```bash
-python3 -B scripts/selftest.py          # 不触碰真实账号
+python3 -B scripts/selftest.py          # 不触碰真实账号（含导航顺序、到期高亮、鉴权开关断言）
+python3 -B scripts/test_auth.py         # 真实 HTTP：登录页 → cookie 会话 → CSRF → 401/403/303 全链路
+python3 -B scripts/test_notify.py       # 可选提醒：命中条件、去重、投递失败不记账（本地假接收端）
 python3 -B scripts/test_providers.py    # 自定义提供商持久化、校验与命令导出
 python3 -B scripts/test_console.py      # 守护退避、缓存并发、登录会话与日志修剪
+python3 scripts/check_upstream.py       # 上游是否有新 tag（离线用 --local）
 docker compose config --quiet
 docker compose ps
-curl -i http://127.0.0.1:8080/api/summary  # 默认端口，未认证应返回 401
-curl -i http://127.0.0.1:8318/usage        # 默认端口，未认证应返回 401
+curl -i http://127.0.0.1:8080/            # 未登录应 303 → /login
+curl -i http://127.0.0.1:8080/api/summary # 未登录应 401；带 -u admin:<token> 应 200
+curl -i http://127.0.0.1:8318/usage       # 未认证应 401
 ```
 
 ## 安全约定
 
 - 数据卷 `0700`，凭据/状态/token 文件 `0600`；进程降权运行。
-- 网页 Basic Auth + 同源校验；API Key 只在 `/api/hermes/key` 返回给已认证会话，页面上默认脱敏。
+- 控制台：`/login` 单密码表单 → 内存会话（默认 12 小时，最多 5 个并发，超出时淘汰最旧）→ 写操作校验 `X-CSRF-Token` 与同源；未认证页面 303、API 401；失败登录固定延迟 0.4s；响应带 `nosniff`/`X-Frame-Options: DENY`/`no-referrer`。**没有关闭鉴权的环境变量**（旧测试期的 `WB_CONSOLE_NOAUTH` 已移除）。Basic Auth 仍兼容脚本。
+- 会话只存在内存：容器重启会让所有人重新登录，但不会影响网关 API Key、用量桥 token 或签到状态。
+- API Key 只在 `/api/hermes/key` 返回给已认证会话，页面上默认脱敏。
 - 网页不展示 UID、昵称或原始网关日志。新的登录二维码和备用链接只保存在当前会话内存中，不写入登录日志；会话结束后清除。
 - 宿主机默认仅发布到 `127.0.0.1`。仅在明确需要、且网络可信时启用上述私有地址绑定；跨公网或不可信网络请保留回环设置并使用 SSH 隧道。
 - 只接入本人或明确获授权的微信账号。
 
 ## 限制
 
-- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，运行 `python3 scripts/build_gateway.py`（Go 1.26+，`--goarch amd64|arm64` 可覆盖目标架构，默认跟随本机）。脚本验证上游提交、应用 `gateway-overlay/` 两个补丁并运行签到与调度策略测试；升级前必须重新核对上游 `checkin.go`、`main.go` 选号逻辑与状态文件。
+- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，运行 `python3 scripts/build_gateway.py`（Go 1.26+，`--goarch amd64|arm64` 可覆盖目标架构，默认跟随本机）。脚本验证上游提交、应用 `gateway-overlay/` 两个补丁并运行签到与调度策略测试；升级前先跑 `scripts/check_upstream.py`。
 - 扫码必须由账号本人在网页显示的二维码/链接上完成，无法自动化。
 - 账号池按可用性调度（当前为到期日最短优先，见上文），网页展示分账号信息不代表可在单次请求中固定使用某个账号。
 - 二维码登录进程默认等待 `LOGIN_TIMEOUT`（300 秒）；网页状态查询检测到超时后会终止该会话。
+- 控制台会话不落盘（重启即失效）；「模型提供商」卡片保持隐藏，产品方向待定。
 
 ## 文件
 
 ```
 Dockerfile              镜像定义（python:3.11-slim + gosu 降权）
-docker-compose.yml      端口映射与数据卷
+docker-compose.yml      端口映射、数据卷与环境变量
 docker-entrypoint.sh    卷属主修正 + 降权
 bin/workbuddy-gateway-manual   本地生成，不纳入 Git
 gateway-overlay/               手动签到补丁与到期优先调度补丁（含单元测试）
 config/config.json.example  网关配置模板（首次启动生成密钥）
-app/boot.py             启动编排（网关守护重启、启动时日志修剪、密钥生成）
-app/controller.py       账号/登录会话/标签/Hermes 信息
+app/boot.py             启动编排（网关守护重启、启动时日志修剪、密钥生成、可选提醒）
+app/auth.py             控制台会话与 CSRF（内存、12 小时、最多 5 个）
+app/controller.py       账号/登录会话/标签/Hermes 信息/额度到期汇总
 app/checkin.py          状态快照与手动签到资格判定
+app/notify.py           可选 webhook 提醒（签到失败、积分将到期）
 app/usage_bridge.py     CC Switch 只读用量桥
-app/web.py              网页与 API
-app/static/index.html   配置网页
-scripts/                跨平台网关构建、离线自测、备份、回滚、模型列表刷新
+app/web.py              网页与 API（登录页、会话、CSRF、同源校验）
+app/static/index.html   配置网页（侧边栏分区）
+app/static/login.html   登录页
+app/static/providers.js 模型提供商预设（卡片暂时隐藏）
+scripts/                跨平台网关构建、离线自测、备份、回滚、模型列表刷新、上游升级检查
 ```
