@@ -9,10 +9,12 @@ from __future__ import annotations
 from typing import Any, NoReturn
 
 import argparse
+import http.client
 import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -23,7 +25,7 @@ import time
 import zipfile
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import ProxyHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 REPO = "https://github.com/richducks/WorkbuddyCCswitch.git"
 BRANCH = "main"
@@ -472,6 +474,125 @@ def cmd_deploy(args) -> None:
           "再按 README 或 skill/references/remote-hermes.md 配置 Hermes 对接")
 
 
+class ProbeValidationError(ValueError):
+    pass
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def probe_lines(stream, deadline: float | None):
+    pending = b""
+    received = 0
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("SSE probe deadline expired")
+        chunk = stream.read1(8192)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("SSE probe deadline expired")
+        if not chunk:
+            if pending:
+                yield pending
+            return
+        received += len(chunk)
+        if received > 2 * 1024 * 1024:
+            raise ProbeValidationError("SSE probe response exceeded 2 MiB")
+        *lines, pending = (pending + chunk).split(b"\n")
+        yield from lines
+
+
+def check_inference_stream(stream, model: str, started: float,
+                           deadline: float | None = None) -> tuple[float, float]:
+    first = None
+    content = []
+    finish = None
+    reported_model = False
+    for line in probe_lines(stream, deadline):
+        if not line.startswith(b"data:"):
+            continue
+        data = line[5:].strip()
+        if data == b"[DONE]":
+            if finish != "stop":
+                raise ProbeValidationError("SSE did not finish with stop")
+            if not reported_model:
+                raise ProbeValidationError("SSE did not report a model")
+            if first is None or "".join(content).strip() != "WBCC_OK":
+                raise ProbeValidationError("SSE reply did not match the probe marker")
+            return first, time.monotonic() - started
+        event = json.loads(data)
+        if not isinstance(event, dict) or "error" in event:
+            raise ProbeValidationError("SSE returned an error event")
+        if "model" in event:
+            if event["model"] != model:
+                raise ProbeValidationError("SSE returned an unexpected model")
+            reported_model = True
+        for choice in event.get("choices") or []:
+            if choice.get("index", 0) != 0:
+                continue
+            delta = choice.get("delta") or {}
+            text = delta.get("content")
+            if text:
+                if first is None:
+                    first = time.monotonic() - started
+                content.append(text)
+            finish = choice.get("finish_reason") or finish
+    raise ProbeValidationError("SSE ended without [DONE]")
+
+
+def verify_gateway(repo_dir: Path, host: str, port: int, model: str | None) -> None:
+    opener = build_opener(ProxyHandler({}), NoRedirect())
+    url = f"http://{host}:{port}/v1"
+    stage = "模型目录"
+    try:
+        config = json.loads((repo_dir / "data/gateway/config.json").read_text(encoding="utf-8"))
+        key = config["gateway"]["apiKey"]
+        if not isinstance(key, str) or not key:
+            raise ProbeValidationError("缺少网关 API Key")
+        req = Request(url + "/models")
+        req.add_unredirected_header("Authorization", "Bearer " + key)
+        with opener.open(req, timeout=10) as resp:
+            ids = {item["id"] for item in json.load(resp)["data"]}
+        if not ids:
+            raise ProbeValidationError("模型目录为空")
+        print(f"PASS: 模型目录可读，返回 {len(ids)} 个模型")
+        if model is None:
+            return
+        stage = "流式推理"
+        if model not in ids:
+            raise ProbeValidationError("指定模型不在网关目录中")
+        body = {
+            "model": model, "stream": True, "max_tokens": 256,
+            "messages": [{"role": "user", "content": "Reply with exactly WBCC_OK."}],
+        }
+        req = Request(url + "/chat/completions", json.dumps(body).encode(),
+                      headers={"Content-Type": "application/json", "Accept": "text/event-stream"})
+        req.add_unredirected_header("Authorization", "Bearer " + key)
+        started = time.monotonic()
+        with opener.open(req, timeout=60) as resp:
+            if resp.headers.get_content_type() != "text/event-stream":
+                raise ProbeValidationError("网关未返回 SSE")
+            first, total = check_inference_stream(resp, model, started, deadline=started + 90)
+    except HTTPError as e:
+        with e:
+            try:
+                kind = json.loads(e.read(4096))["error"]["type"]
+            except (OSError, http.client.HTTPException, ValueError, TypeError, KeyError):
+                kind = None
+        detail = f" {kind}" if isinstance(kind, str) and re.fullmatch(r"[a-z0-9_]{1,64}", kind) else ""
+        fail(f"{stage}失败（HTTP {e.code}{detail}）")
+    except ProbeValidationError as e:
+        fail(f"{stage}失败：{e}")
+    except TimeoutError:
+        fail(f"{stage}失败：探测超时")
+    except PermissionError:
+        fail(f"{stage}失败：当前用户无法读取网关配置，请使用部署用户运行，或核对 Compose 的 UID/GID")
+    except (OSError, http.client.HTTPException, ValueError, TypeError, KeyError, AttributeError) as e:
+        fail(f"{stage}失败（{type(e).__name__}）")
+    print(f"PASS: 流式推理完成，模型 {model}，首文本 {first:.2f}s，总耗时 {total:.2f}s")
+
+
 def cmd_verify(args) -> None:
     repo_dir = Path(args.dir).resolve()
     if not (repo_dir / "docker-compose.yml").is_file():
@@ -482,7 +603,10 @@ def cmd_verify(args) -> None:
     unhealthy = [line for line in rows if "(healthy)" not in line]
     if unhealthy:
         fail("容器状态异常：" + "；".join(unhealthy))
-    web_host, web_port = published_ports(repo_dir)[8080]
+    print("PASS: 容器健康检查通过")
+    ports = published_ports(repo_dir)
+    verify_gateway(repo_dir, *ports[8317], args.inference_model)
+    web_host, web_port = ports[8080]
     try:
         with build_opener(ProxyHandler({})).open(f"http://{web_host}:{web_port}/api/providers", timeout=5):
             pass
@@ -493,7 +617,7 @@ def cmd_verify(args) -> None:
         fail(f"console check failed: {e}")
     else:
         fail("网页未要求鉴权——配置异常，请检查 .env 与 compose")
-    print(f"PASS: 容器 healthy，网页 {web_host}:{web_port} 鉴权正常（401 for unauthenticated）")
+    print(f"PASS: 网页 {web_host}:{web_port} 鉴权正常（未认证返回 401）")
 
 
 def cmd_tunnel(args) -> None:
@@ -530,8 +654,9 @@ def main() -> None:
     deploy.add_argument("--dir", default="./WorkbuddyCCswitch")
     deploy.set_defaults(func=cmd_deploy)
 
-    verify = sub.add_parser("verify", help="检查本机容器健康与网页鉴权")
+    verify = sub.add_parser("verify", help="检查本机容器健康、模型目录和网页鉴权")
     verify.add_argument("--dir", default="./WorkbuddyCCswitch")
+    verify.add_argument("--inference-model", help="额外验证指定模型的完整流式推理，会消耗上游用量")
     verify.set_defaults(func=cmd_verify)
 
     tunnel = sub.add_parser("tunnel", help="为本地 Hermes 打通到服务器部署的 SSH 隧道")

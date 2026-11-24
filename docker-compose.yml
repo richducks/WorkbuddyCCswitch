@@ -21,8 +21,6 @@ services:
       HOST_WEB_PORT: "${HOST_WEB_PORT:-8080}"
       HOST_BRIDGE_PORT: "${HOST_BRIDGE_PORT:-8318}"
       LOGIN_TIMEOUT: "300"
-      # 测试阶段：关闭控制台管理员令牌登录；恢复鉴权删除本行并 docker compose up -d 重建
-      WB_CONSOLE_NOAUTH: "1"
     ports:
       - "${BIND_IP:-127.0.0.1}:${HOST_WEB_PORT:-8080}:8080"
       - "${BIND_IP:-127.0.0.1}:${HOST_GW_PORT:-8317}:8317"

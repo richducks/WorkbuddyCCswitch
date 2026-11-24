@@ -59,9 +59,9 @@ def main() -> None:
 
     root = Path(__file__).resolve().parent.parent
     overlay_dir = root / "gateway-overlay"
-    patch = overlay_dir / "scheduler.patch"
+    patches = [overlay_dir / name for name in ("scheduler.patch", "expire-first.patch", "chat-stream-retry.patch")]
     overlay_go = sorted(overlay_dir.glob("*.go"))
-    if not patch.is_file() or not overlay_go:
+    if not all(patch.is_file() for patch in patches) or not overlay_go:
         fail(f"overlay 不完整：{overlay_dir}")
 
     tmp = Path(tempfile.mkdtemp(prefix="wbcc-build-"))
@@ -70,19 +70,16 @@ def main() -> None:
         sh(["git", "clone", "--quiet", "--depth", "1", "--branch", TAG, "--", UPSTREAM, str(src)])
         if sh(["git", "rev-parse", "HEAD"], cwd=src).strip() != REVISION:
             fail(f"上游 {TAG} HEAD 与固定提交 {REVISION[:12]} 不符，拒绝构建")
-        sh(["git", "apply", str(patch)], cwd=src)
-        expire_patch = overlay_dir / "expire-first.patch"
-        if not expire_patch.is_file():
-            fail(f"overlay 不完整：缺少 {expire_patch}")
-        sh(["git", "apply", str(expire_patch)], cwd=src)
+        for patch in patches:
+            sh(["git", "apply", str(patch)], cwd=src)
         for f in overlay_go:
             shutil.copy(f, src / f.name)
 
         # Tests execute on the host platform so they actually run on macOS/Windows too.
         test_env = os.environ.copy()
         test_env.update({"GOTOOLCHAIN": "local", "CGO_ENABLED": "0"})
-        print("Running check-in and scheduling tests")
-        sh([str(go_cmd), "test", "-run", r"Checkin|CheckIn|ExpireFirst|EarliestQuotaEnd", "."], cwd=src, env=test_env)
+        print("Running check-in, scheduling and inference resilience tests")
+        sh([str(go_cmd), "test", "-run", r"Checkin|CheckIn|ExpireFirst|EarliestQuotaEnd|ChatStreamRetry|StreamResilien|StreamTimeout|IdleReadCloser|NetworkError|UpstreamRetries|RateLimit|StreamChat.*Tool", "."], cwd=src, env=test_env)
 
         build_env = os.environ.copy()
         build_env.update({"GOTOOLCHAIN": "local", "CGO_ENABLED": "0",

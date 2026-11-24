@@ -141,11 +141,25 @@ python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 p
 python3 -B scripts/selftest.py          # 不触碰真实账号
 python3 -B scripts/test_providers.py    # 自定义提供商持久化、校验与命令导出
 python3 -B scripts/test_console.py      # 守护退避、缓存并发、登录会话与日志修剪
+python3 -B scripts/test_inference_probe.py # 流式结束、错误帧及模型匹配
 docker compose config --quiet
 docker compose ps
 curl -i http://127.0.0.1:8080/api/summary  # 默认端口，未认证应返回 401
 curl -i http://127.0.0.1:8318/usage        # 默认端口，未认证应返回 401
 ```
+
+运行中的网关可用部署脚本分项检查。省略 `--inference-model` 时只检查模型目录和服务状态。指定模型时会发出一次真实请求并消耗少量上游用量，检查返回模型、文本和 SSE 结束标记。网页鉴权检查要求未登录请求返回 401。
+
+```bash
+python3 skill/scripts/deploy_workbuddy_ccswitch.py verify --dir . --inference-model kimi-k3-2
+```
+
+### 模型切换与推理失败
+
+- WorkBuddy 网关根据额度、模型冷却和账号可用性为同一请求选账号。模型目录列出服务提供的模型，实际可用性取决于账号。遇到 `503 no_available_account` 时，在控制台核对账号余额及模型冷却，再用相同模型重新探测。
+- Hermes 的 `model` 决定主模型，`fallback_providers` 决定自动降级。需要稳定的选模行为时，为目标 profile 选择通过推理验收的明确模型 ID，备用只配置一个独立且已通过验收的提供商。会话已有模型覆盖时，用新会话核对默认路由。主模型遇到限流时，Hermes 可能在冷却期间继续使用备用。
+- Hermes 原生 `openai-codex` 使用自己的 OAuth 和 Responses 流。排查 Codex 时，在目标 profile 的新会话直接选定 Codex，检查 Hermes 日志中的首事件耗时、流是否完成和是否实际发生降级。WorkBuddy 侧用网关日志的请求标识、模型和流结束结果定位。
+- Chat Completions 流在发送数据前提前关闭且缺少结束原因时，构建版网关可沿用首字节重试预算重试一次。已发出文本、推理或工具数据的流若中断，网关返回不完整错误。
 
 ## 安全约定
 

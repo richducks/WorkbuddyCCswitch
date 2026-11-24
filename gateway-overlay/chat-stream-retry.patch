@@ -1,0 +1,106 @@
+diff --git a/main.go b/main.go
+index 7309658..0e127ee 100644
+--- a/main.go
++++ b/main.go
+@@ -847,13 +847,14 @@ func initHTTPClient() {
+ // 只要持续有数据到达就不断顺延截止时间；一旦超过 timeout 没有任何新数据，
+ // 就取消上游请求上下文，使阻塞中的 Read 立即返回错误，从而中断卡死的流。
+ type idleReadCloser struct {
+-	rc      io.ReadCloser
+-	timeout time.Duration
+-	cancel  context.CancelFunc
+-	mu      sync.Mutex
+-	timer   *time.Timer
+-	last    time.Time // 最近一次读到数据的时刻
+-	stopped bool
++	rc       io.ReadCloser
++	timeout  time.Duration
++	cancel   context.CancelFunc
++	mu       sync.Mutex
++	timer    *time.Timer
++	last     time.Time // 最近一次读到数据的时刻
++	stopped  bool
++	timedOut bool
+ }
+ 
+ func newIdleReadCloser(rc io.ReadCloser, timeout time.Duration, cancel context.CancelFunc) *idleReadCloser {
+@@ -875,6 +876,7 @@ func (b *idleReadCloser) check() {
+ 	idle := time.Since(b.last)
+ 	if idle >= b.timeout {
+ 		b.stopped = true
++		b.timedOut = true
+ 		b.cancel()
+ 		return
+ 	}
+@@ -883,11 +885,14 @@ func (b *idleReadCloser) check() {
+ 
+ func (b *idleReadCloser) Read(p []byte) (int, error) {
+ 	n, err := b.rc.Read(p)
++	b.mu.Lock()
+ 	if n > 0 {
+-		b.mu.Lock()
+ 		b.last = time.Now() // 有数据到达即视为活跃
+-		b.mu.Unlock()
+ 	}
++	if b.timedOut && errors.Is(err, context.Canceled) {
++		err = context.DeadlineExceeded
++	}
++	b.mu.Unlock()
+ 	return n, err
+ }
+ 
+@@ -3946,12 +3951,16 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
+ 				debugTraceID(r), reqID, commentLines, metadataLines)
+ 		}
+ 
+-		if canReplayStream(scanErr, guard.hasData(), replays < replayBudget, r.Context().Err() != nil) {
++		replayErr := scanErr
++		if replayErr == nil && finishReason == "" {
++			replayErr = errStreamClosedWithoutFinish
++		}
++		if canReplayStream(replayErr, guard.hasData(), replays < replayBudget, r.Context().Err() != nil) {
+ 			replays++
+ 			log.Printf("[首字节前重放] traceId=%s requestId=%d 模型=%s 账号=%s 原因=首个有效字节前上游连接中断（%v），客户端尚未收到内容，安全重放 第%d次",
+-				debugTraceID(r), reqID, modelName, acc.Path, safeDebugError(scanErr), replays)
++				debugTraceID(r), reqID, modelName, acc.Path, safeDebugError(replayErr), replays)
+ 			debugEvent(r, "warn", "stream_first_byte_replay", map[string]any{
+-				"reason":          safeDebugError(scanErr),
++				"reason":          safeDebugError(replayErr),
+ 				"attempt":         attempt + 1,
+ 				"business_impact": "客户端未收到任何有效内容，重放可规避边缘节点静默期误杀；会额外消耗一次上游额度",
+ 			})
+@@ -4073,6 +4082,12 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
+ 			"error_type": debugErrorType(err),
+ 			"error":      safeDebugError(err),
+ 		})
++		if errors.Is(err, context.DeadlineExceeded) && r.Context().Err() == nil {
++			log.Printf("[异常] traceId=%s requestId=%d 模型=%s 发生阶段=聚合上游流 返回状态码=504 耗时=%v 原因=上游空闲超时",
++				debugTraceID(r), reqID, modelName, time.Since(startTime))
++			writeUpstreamError(w, r, http.StatusGatewayTimeout, "upstream_idle_timeout", "上游长时间无数据，本次回复不完整")
++			return
++		}
+ 		logAggregateFailure(r, reqID, err)
+ 		writeOpenAIError(w, http.StatusInternalServerError, "aggregate_error", "聚合上游流式响应失败: "+err.Error())
+ 		return
+diff --git a/stream_resilience.go b/stream_resilience.go
+index e36512a..bff976e 100644
+--- a/stream_resilience.go
++++ b/stream_resilience.go
+@@ -92,14 +92,15 @@ func (h *streamHeartbeat) Stop() {
+ }
+ 
+ // canReplayStream 只允许在客户端没有收到任何有效数据、预算未用尽、
+-// 且错误属于瞬时网络故障或上游空闲超时时重放。
++// 且错误属于瞬时网络故障、上游提前关闭或空闲超时时重放。
+ // clientCanceled 由调用方根据 r.Context().Err() 判断；内部 idle reader 超时
+ // 也会表现为 context.Canceled，因此必须与客户端取消区分。
+ func canReplayStream(scanErr error, sawFirstData, budgetLeft, clientCanceled bool) bool {
+ 	if scanErr == nil || sawFirstData || !budgetLeft || clientCanceled {
+ 		return false
+ 	}
+-	if errors.Is(scanErr, context.Canceled) || errors.Is(scanErr, context.DeadlineExceeded) {
++	if errors.Is(scanErr, context.Canceled) || errors.Is(scanErr, context.DeadlineExceeded) ||
++		errors.Is(scanErr, errStreamClosedWithoutFinish) {
+ 		return true
+ 	}
+ 	return isTransientNetworkError(scanErr)
