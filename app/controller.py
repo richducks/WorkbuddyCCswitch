@@ -265,6 +265,7 @@ class Controller:
                     "used": a.get("quotaUsed") if a else None,
                     "remaining": a.get("quotaRemaining") if a else None,
                     "known": a.get("quotaKnown") if a else None,
+                    "expireAt": a.get("quotaExpireAt") if a else None,
                 } if a else None,
                 "checkin": checkin,
                 "eligible": eligible,

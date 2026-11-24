@@ -2,6 +2,7 @@
 """Offline self-test: no credentials, no network, no real gateway touched."""
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -133,6 +134,12 @@ check("web: add-account button present", "添加微信账号" in page)
 check("web: check-in controls present", "补签" in page and "checkinAllBtn" in page)
 check("web: separate manual check-in action", 'class="sm manualCheckinBtn"' in page and '/api/checkin/manual' in page)
 check("web: check-in status rendering present", "badge" in page and "今日签到" in page)
+sidenav = page[page.index('id="sidenav"'):page.index("</nav>")]
+nav_hrefs = re.findall(r'<a href="#(\w+)"', re.sub(r"<!--.*?-->", "", sidenav, flags=re.S))
+check("web: nav order is account pool → models → hermes → bridge",
+      nav_hrefs == ["acctCard", "modelsCard", "hermesCard", "bridgeCard"])
+check("web: default tab is the first nav item",
+      "activateTab(navLinks[0])" in page and nav_hrefs[:1] == ["acctCard"])
 
 print(f"\n{len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

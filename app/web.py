@@ -4,7 +4,11 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import os
+import secrets
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -26,6 +30,12 @@ def _check_origin(handler: "Handler") -> bool:
     return parsed.netloc == host and parsed.scheme in ("http", "https")
 
 
+SESSION_COOKIE = "wb_session"
+SESSION_TTL = 12 * 3600
+# 测试阶段可设 WB_CONSOLE_NOAUTH=1 关闭登录（仅限绑定回环地址时使用）；恢复鉴权移除该变量即可
+NOAUTH = os.environ.get("WB_CONSOLE_NOAUTH") == "1"
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "WBConsole/1.0"
 
@@ -40,14 +50,76 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return user == "admin" and hmac.compare_digest(password, cast(ConsoleServer, self.server).token)
 
+    def _cookie_auth(self) -> bool:
+        sid = None
+        for part in self.headers.get("Cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == SESSION_COOKIE:
+                sid = v
+                break
+        if not sid:
+            return False
+        srv = cast(ConsoleServer, self.server)
+        with srv.session_lock:
+            exp = srv.sessions.get(sid)
+            if exp is None:
+                return False
+            if exp < time.time():
+                srv.sessions.pop(sid, None)
+                return False
+        return True
+
+    def _authed(self) -> bool:
+        if NOAUTH:
+            return True
+        return self._auth() or self._cookie_auth()
+
     def _require(self) -> bool:
-        if self._auth():
+        if self._authed():
             return True
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="WorkBuddy Console", charset="UTF-8"')
         self.send_header("Content-Length", "0")
         self.end_headers()
         return False
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _serve_login(self) -> None:
+        if self._authed():
+            return self._redirect("/")
+        self._send(200, (STATIC / "login.html").read_text(encoding="utf-8"), "text/html; charset=utf-8")
+
+    def _handle_login(self) -> None:
+        if not _check_origin(self):
+            return self._send(403, {"error": "跨站请求被拒绝"})
+        try:
+            data = self._body()
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        srv = cast(ConsoleServer, self.server)
+        token = data.get("token")
+        if not isinstance(token, str) or not hmac.compare_digest(token, srv.token):
+            time.sleep(0.4)  # 轻微延迟，增加在线爆破成本
+            return self._send(401, {"error": "令牌错误"})
+        sid = secrets.token_urlsafe(32)
+        now = time.time()
+        with srv.session_lock:
+            srv.sessions[sid] = now + SESSION_TTL
+            for k in [k for k, v in srv.sessions.items() if v < now]:
+                srv.sessions.pop(k, None)
+        body = json.dumps({"ok": True}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Set-Cookie", f"{SESSION_COOKIE}={sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send(self, code: int, body: Any, content_type: str = "application/json; charset=utf-8") -> None:
         if isinstance(body, (dict, list)):
@@ -72,18 +144,18 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("请求体必须是 JSON 对象")
         return data
 
-    def _guard(self) -> bool:
-        if not self._require():
-            return False
-        if not _check_origin(self):
-            self._send(403, {"error": "跨站请求被拒绝"})
-            return False
-        return True
-
     def do_GET(self):
-        if not self._guard():
-            return
         u = urlparse(self.path)
+        if u.path == "/login":
+            return self._serve_login()
+        if not self._authed():
+            # 浏览器直接访问（无 Basic 头）：跳登录页；curl/脚本带 Basic 头或访问 API 时维持 401
+            if not self.headers.get("Authorization") and not u.path.startswith("/api/"):
+                return self._redirect("/login")
+            if not self._require():
+                return
+        if not _check_origin(self):
+            return self._send(403, {"error": "跨站请求被拒绝"})
         try:
             if u.path in ("/", "/index.html"):
                 return self._send(200, (STATIC / "index.html").read_text(encoding="utf-8"), "text/html; charset=utf-8")
@@ -106,9 +178,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
     def do_POST(self):
-        if not self._guard():
-            return
         u = urlparse(self.path)
+        if u.path == "/login":
+            return self._handle_login()
+        if not self._require():
+            return
+        if not _check_origin(self):
+            return self._send(403, {"error": "跨站请求被拒绝"})
         try:
             if u.path.startswith("/api/providers/") and self.headers.get_content_type() != "application/json":
                 return self._send(415, {"error": "提供商配置须以 JSON 提交"})
@@ -164,10 +240,13 @@ class ConsoleServer(ThreadingHTTPServer):
     allow_reuse_address = True
     controller: Controller
     token: str
+    sessions: dict[str, float]
+    session_lock: threading.Lock
 
 
 def build_web_server(controller: Controller, token: str, port: int | None = None) -> ConsoleServer:
     import os
     httpd = ConsoleServer(("0.0.0.0", port or int(os.environ.get("WEB_PORT", "8080"))), Handler)
     httpd.controller, httpd.token = controller, token
+    httpd.sessions, httpd.session_lock = {}, threading.Lock()
     return httpd

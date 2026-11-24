@@ -41,9 +41,11 @@
 
   function providerRow(row) {
     const card = element('div', '', 'provider-row');
-    card.append(element('strong', row.name), element('div', `${row.provider} · ${protocols[row.transport]}`, 'file'),
-      element('div', row.url, 'file'), element('div', `默认：${row.defaultModel} · 共 ${row.entry.models.length} 个模型`, 'hint'));
-    if (row.keyEnv) card.append(element('div', `密钥变量：${row.keyEnv}`, 'file'));
+    card.append(element('strong', row.name));
+    const meta = element('span', '', 'file');
+    meta.textContent = `${row.provider} · ${protocols[row.transport]} · 默认：${row.defaultModel} · 共 ${row.entry.models.length} 个模型`
+      + (row.keyEnv ? ` · 密钥变量：${row.keyEnv}` : '');
+    card.append(meta, element('div', row.url, 'file'));
     const actions = element('div', '', 'bar');
     actions.append(button('复制配置命令', () => copy(row.command, '配置命令已复制')),
       button('编辑', () => showForm(row)), button('移除预设', () => remove(row)));

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>控制台登录</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel-2: #1c2330;
+    --fg: #e6edf3; --muted: #8b949e; --border: #30363d;
+    --accent: #58a6ff; --ok: #3fb950; --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         background: var(--bg); color: var(--fg);
+         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+         font-size: 14px; line-height: 1.55; }
+  .card { width: min(420px, 92vw); background: var(--panel); border: 1px solid var(--border);
+          border-radius: 12px; padding: 28px 26px; }
+  h1 { margin: 0 0 6px; font-size: 19px; letter-spacing: .3px; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 20px; }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin: 14px 0 6px; }
+  input { width: 100%; font: inherit; padding: 9px 11px; border-radius: 7px;
+          background: var(--panel-2); border: 1px solid var(--border); color: var(--fg); outline: none; }
+  input:focus { border-color: var(--accent); }
+  button { width: 100%; margin-top: 18px; font: inherit; font-size: 14px; padding: 9px 13px;
+           border-radius: 7px; cursor: pointer; font-weight: 600;
+           color: var(--accent); background: rgba(88,166,255,.12); border: 1px solid var(--accent); transition: .15s; }
+  button:hover:not(:disabled) { filter: brightness(1.15); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .msg { min-height: 18px; margin-top: 12px; font-size: 12.5px; color: var(--bad); }
+  .msg.ok { color: var(--ok); }
+  .hint { margin-top: 18px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 12px; }
+  code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; font-size: 11.5px; }
+</style>
+</head>
+<body>
+  <form class="card" id="f">
+    <h1>Hermes 模型接入<span>控制台</span></h1>
+    <div class="sub">请输入管理员令牌登录（有效期 12 小时）</div>
+    <label for="token">管理员令牌</label>
+    <input id="token" name="token" type="password" autocomplete="current-password" autofocus required />
+    <button type="submit" id="btn">登 录</button>
+    <div class="msg" id="msg"></div>
+    <div class="hint">令牌存放在宿主机 <code>data/web/web.token</code>（容器内 <code>/data/web/web.token</code>）</div>
+  </form>
+<script>
+  const f = document.getElementById('f'), msg = document.getElementById('msg'), btn = document.getElementById('btn');
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    btn.disabled = true; msg.textContent = ''; msg.classList.remove('ok');
+    try {
+      const r = await fetch('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: document.getElementById('token').value })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.ok) { msg.textContent = '登录成功，正在跳转…'; msg.classList.add('ok'); location.href = '/'; return; }
+      msg.textContent = d.error || ('登录失败（HTTP ' + r.status + '）');
+    } catch (err) { msg.textContent = '网络错误：' + err; }
+    btn.disabled = false;
+  });
+</script>
+</body>
+</html>

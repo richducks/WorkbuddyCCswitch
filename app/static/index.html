@@ -77,6 +77,10 @@
   .modal a { color: var(--accent); word-break: break-all; }
   .step-num { display: inline-block; width: 18px; height: 18px; line-height: 18px; text-align: center;
               border-radius: 50%; background: rgba(88,166,255,.15); color: var(--accent); font-size: 11px; margin-right: 5px; }
+  .json-fold { margin-top: 12px; }
+  .json-fold summary { cursor: pointer; color: var(--muted); font-size: 12.5px; user-select: none; }
+  .json-fold summary:hover { color: var(--fg); }
+  .json-fold pre { margin-top: 10px; max-height: 320px; overflow: auto; }
   .empty { color: var(--muted); text-align: center; padding: 22px; }
   .loading { opacity: .5; pointer-events: none; }
   .provider-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 12px; margin-top: 12px; }
@@ -86,6 +90,24 @@
   .provider-row { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
   .provider-form .full { grid-column: 1 / -1; }
   .provider-form .bar { margin: 0; }
+  .layout { display: flex; gap: 22px; align-items: flex-start; }
+  .sidenav { position: sticky; top: 20px; flex: 0 0 186px; display: flex; flex-direction: column; gap: 16px;
+             background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 10px; }
+  .nav-title { font-size: 11px; color: var(--muted); letter-spacing: .1em; padding: 0 10px; margin-bottom: 4px; }
+  .sidenav a { display: block; padding: 7px 10px; border-radius: 7px; color: var(--muted); text-decoration: none;
+               font-size: 13px; transition: .15s; }
+  .sidenav a:hover { color: var(--fg); background: var(--panel-2); }
+  .sidenav a.active { color: var(--accent); background: rgba(88,166,255,.12); font-weight: 600; }
+  .main { flex: 1; min-width: 0; }
+  section.card { scroll-margin-top: 16px; }
+  @media (max-width: 920px) {
+    .layout { flex-direction: column; }
+    .sidenav { position: static; flex: none; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px; }
+    .nav-group { display: contents; }
+    .nav-title { display: none; }
+    .sidenav a { flex: 0 0 auto; border: 1px solid var(--border); background: var(--panel-2); }
+    .sidenav a.active { border-color: var(--accent); }
+  }
   @media (max-width: 640px), (pointer: coarse) {
     body { font-size: 15px; }
     button { padding: 10px 14px; }
@@ -96,11 +118,30 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap layout">
+  <nav class="sidenav" id="sidenav" aria-label="模块导航">
+    <!-- 顺序按「日常打开控制台先看什么」排：账号池 → 模型目录 → Hermes 对接 → 用量桥；首个导航项即默认标签页 -->
+    <div class="nav-group">
+      <div class="nav-title">账号与签到</div>
+      <a href="#acctCard">微信账号池</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-title">模型接入</div>
+      <!-- 模型提供商模块暂时隐藏（用户评审意见：暂不做项目拓展），恢复时删除下一行注释并去掉 providersCard 的 hidden -->
+      <!-- <a href="#providersCard">模型提供商</a> -->
+      <a href="#modelsCard">模型目录</a>
+      <a href="#hermesCard">Hermes 对接</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-title">用量与状态</div>
+      <a href="#bridgeCard">用量桥 / CC Switch</a>
+    </div>
+  </nav>
+  <div class="main">
   <header>
     <div>
       <h1>Hermes <span>模型接入</span>控制台</h1>
-      <div class="sub">模型提供商 · WorkBuddy 微信账号与签到 · CC Switch 用量桥</div>
+      <div class="sub">WorkBuddy 微信账号与签到 · CC Switch 用量桥</div>
     </div>
     <div class="meta">
       <span class="pill" id="clock" title="网关报告的当前北京时间">--</span>
@@ -110,9 +151,9 @@
   </header>
 
   <div class="grid">
-    <section class="card wide" id="providersCard">
+    <section class="card wide" id="providersCard" hidden>
       <h2>模型提供商</h2>
-      <div class="provider-row"><strong>WorkBuddy Gateway</strong> <span class="file"><a href="#acctCard">内置 · 账号与签到见下方</a></span></div>
+      <div class="provider-row"><strong>WorkBuddy Gateway</strong> <span class="file"><a href="#acctCard">内置 · 点此打开账号与签到</a></span></div>
       <div id="providerList"><p class="hint">正在读取自定义提供商…</p></div>
       <div class="bar"><button class="primary" type="button" id="addProviderBtn" disabled>＋ 添加提供商</button><button type="button" id="refreshProvidersBtn">刷新列表</button></div>
       <p class="hint">保存后复制配置命令，到运行 Hermes 的宿主机执行。API Key 不填在这里；若需要鉴权，只填写环境变量名。保存或移除预设不会修改 Hermes 的默认模型或备用链。</p>
@@ -152,7 +193,7 @@
       <div class="hint" id="batchCheckinResults" aria-live="polite" style="white-space:pre-wrap" hidden></div>
     </section>
 
-    <section class="card">
+    <section class="card" id="hermesCard">
       <h2>WorkBuddy · Hermes 对接</h2>
       <div class="kv">
         <div class="k">端点</div><div class="v" id="hEndpoint">--</div>
@@ -164,7 +205,10 @@
         <button class="sm" id="copyCmdBtn">复制配置命令</button>
         <button class="sm" id="copyKeyBtn">复制完整 Key</button>
       </div>
-      <pre id="providerJson" style="margin-top:12px">--</pre>
+      <details class="json-fold">
+        <summary>Provider JSON（含全部模型）<span class="file" id="providerJsonSize"></span></summary>
+        <pre id="providerJson">--</pre>
+      </details>
       <div class="hint">
         在<b>宿主机</b>执行上面的命令，并把 API Key 写入 <code>~/.hermes/.env</code>
         的 <code>WORKBUDDY_GATEWAY_API_KEY</code>（用 Hermes 的安全写入方式）。
@@ -172,7 +216,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" id="modelsCard">
       <h2>WorkBuddy 模型目录 <span class="n" id="modelCount"></span></h2>
       <div class="kv">
         <div class="k">可用模型</div><div class="v" id="modelIds">--</div>
@@ -187,7 +231,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" id="bridgeCard">
       <h2>用量桥 / CC Switch</h2>
       <div class="kv">
         <div class="k">桥地址</div><div class="v" id="bridgeUrl">--</div>
@@ -204,6 +248,7 @@
         用量刷新只读，不会触发签到。
       </div>
     </section>
+  </div>
   </div>
 </div>
 
@@ -263,6 +308,16 @@ function fmtTime(v) {
   const d = new Date(v < 1e12 ? v * 1000 : v);  // 兼容秒 / 毫秒时间戳
   return d.toLocaleString('zh-CN', {hour12:false, timeZone:'Asia/Shanghai'});
 }
+function fmtExpire(v) {
+  const n = Number(v);
+  if (!v || !isFinite(n) || n <= 0) return null;  // 0 = 未知（无带截止时间的权益）
+  const d = new Date(n < 1e12 ? n * 1000 : n);
+  const text = new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', hour12:false,
+    year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}).format(d);
+  const left = d.getTime() - Date.now();
+  const cls = left <= 0 ? 'bad' : (left <= 3 * 86400 * 1000 ? 'warn' : '');
+  return {text, cls};
+}
 function badge(status, label) {
   let cls = 'mute';
   if (status === 'success') cls = 'ok';
@@ -290,6 +345,7 @@ function render(d) {
       const quota = q && q.known
         ? `<span class="quota">${fmtQuota(q.remaining)} / ${fmtQuota(q.total)}</span>`
         : '<span class="empty" style="padding:0">—</span>';
+      const exp = q ? fmtExpire(q.expireAt) : null;
       const source = `${esc(a.edition || '未加载')} · ${esc(a.state || (a.loaded ? '?' : '未加载'))}`;
       const c = a.checkin;
       const extra = c.attempts ? ` · ${esc(c.attempts)} 次` : '';
@@ -298,7 +354,7 @@ function render(d) {
       return `<tr>
         <td><div>${label}</div><div class="file">${esc(a.file)}</div></td>
         <td><div>${source}</div><div class="file">${a.loaded ? '已加载' : '文件存在，待热加载'}</div></td>
-        <td>${quota}</td>
+        <td>${quota}${exp ? `<div class="file" style="margin-top:3px;${exp.cls ? `color:var(--${exp.cls})` : ''}">积分到期：${exp.text}</div>` : ''}</td>
         <td>${chk}
           ${d.autoCheckinEnabled && c.nextAt ? `<div class="file" style="margin-top:3px">计划${c.status === 'failed' ? '重试' : '签到'}：${fmtTime(c.nextAt)}</div>` : ''}
           ${c.lastAt ? `<div class="file" style="margin-top:3px">${c.status === 'success' ? '签到时间' : '最近尝试'}：${fmtTime(c.lastAt)}</div>` : ''}
@@ -315,13 +371,14 @@ function render(d) {
   $('#hEndpoint').textContent = h.endpoint;
   $('#hModel').textContent = h.model;
   $('#hKey').textContent = h.hasKey ? h.keyMasked : '未生成';
-  $('#providerJson').textContent = JSON.stringify(h.providerEntry, null, 2);
+  const pj = JSON.stringify(h.providerEntry, null, 2);
+  $('#providerJson').textContent = pj;
+  $('#providerJsonSize').textContent = `（${pj.split('\n').length} 行 · ${(pj.length / 1024).toFixed(1)} KB）`;
   $('#bridgeUrl').textContent = d.bridgeUrl + '/usage';
   const models = d.modelCatalog || [];
   $('#modelCount').textContent = `共 ${models.length} 个`;
   $('#modelIds').innerHTML = models.length
-    ? models.slice(0, 12).map(m => `<code>${esc(m.id)}</code>`).join(' ')
-      + (models.length > 12 ? `<span class="hint" style="margin:0">… 等 ${models.length} 个</span>` : '')
+    ? models.map(m => `<code>${esc(m.id)}</code>`).join(' ')
     : '—';
 
   document.querySelectorAll('.manualCheckinBtn').forEach(b => b.onclick = () => doManualCheckin(b.dataset.file));
@@ -509,6 +566,22 @@ $('#copyCmdBtn').onclick = () => copy(summary?.hermes.configCommand, '配置命�
 $('#copyKeyBtn').onclick = async () => { try { await copy((await api('/api/hermes/key')).apiKey, '完整 Key 已复制'); } catch(e){toast(e.message,true);} };
 $('#copyRefreshBtn').onclick = () => copy(summary?.hermes.refreshCommand, '模型刷新命令已复制（在本仓库目录执行）');
 $('#copyBridgeBtn').onclick = () => copy($('#bridgeUrl').textContent, '桥地址已复制');
+
+const navLinks = [...document.querySelectorAll('#sidenav a')];
+const navSections = navLinks.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+function activateTab(link) {
+  const target = document.querySelector(link.getAttribute('href'));
+  if (!target) return;
+  navLinks.forEach(x => x.classList.toggle('active', x === link));
+  navSections.forEach(s => { s.hidden = s !== target; });
+}
+navLinks.forEach(a => a.addEventListener('click', e => { e.preventDefault(); activateTab(a); }));
+// 卡片内跳转链接（如“账号与签到见下方”）改为切换标签页
+document.querySelectorAll('section a[href^="#"]').forEach(a => a.addEventListener('click', e => {
+  const link = navLinks.find(x => x.getAttribute('href') === a.getAttribute('href'));
+  if (link) { e.preventDefault(); activateTab(link); }
+}));
+if (navLinks.length) activateTab(navLinks[0]);
 
 load();
 setInterval(load, 15000);
