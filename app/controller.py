@@ -48,6 +48,20 @@ FILE_RE = re.compile(r"^workbuddy[0-9]*\.json$")
 URL_RE = re.compile(r"https://copilot\.tencent\.com/login\?[^\s\u2580-\u25ff]+")
 
 
+def checkin_only_marker(filename: str) -> Path:
+    return ROOT / (filename + ".checkin-only")
+
+
+def is_checkin_only(filename: str) -> bool:
+    try:
+        checkin_only_marker(filename).lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
 def private_write(path: Path, data: str) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w") as f:
@@ -252,8 +266,10 @@ class Controller:
                 "message": c.get("message", "") if current else "",
             }
             eligible = bool(a and name in candidates({name: a}, [name], today))
+            checkin_only = is_checkin_only(name)
             accounts.append({
                 "file": name,
+                "checkinOnly": checkin_only,
                 "label": labels.get(name) or f"账号 {i} · {name}",
                 "loaded": a is not None,
                 "edition": a.get("edition") if a else None,
@@ -268,8 +284,8 @@ class Controller:
                     "expireAt": a.get("quotaExpireAt") if a else None,
                 } if a else None,
                 "checkin": checkin,
-                "eligible": eligible,
-                "manualEligible": bool(manual_available and current and c.get("manualReady") is True),
+                "eligible": not checkin_only and eligible,
+                "manualEligible": bool(not checkin_only and manual_available and current and c.get("manualReady") is True),
             })
         with self._sessions_lock:
             self._prune_sessions()
@@ -292,6 +308,7 @@ class Controller:
     def next_filename(self) -> str:
         used = {p.name for p in ROOT.glob("workbuddy*.json")}
         used |= {p.name for p in (ROOT / ".disabled").glob("workbuddy*.json")}
+        used |= {p.name.removesuffix(".checkin-only") for p in ROOT.glob("workbuddy*.json.checkin-only")}
         n = 2
         while f"workbuddy{n}.json" in used:
             n += 1
@@ -303,7 +320,7 @@ class Controller:
         for sid in [sid for sid, s in self.sessions.items() if s.finished_at is not None and s.finished_at < cutoff]:
             del self.sessions[sid]
 
-    def add_account(self) -> dict:
+    def add_account(self, *, checkin_only: bool = False) -> dict:
         if not self._login_lock.acquire(blocking=False):
             raise ValueError("已有登录会话在进行，请等待完成或取消后再试")
         try:
@@ -313,6 +330,8 @@ class Controller:
                     raise ValueError("已有登录会话在进行，请等待完成或取消后再试")
             filename = self.next_filename()
             sid = secrets.token_hex(6)
+            if checkin_only:
+                atomic(checkin_only_marker(filename), b"checkin-only\n")
             proc = subprocess.Popen(
                 [str(BIN), "login", "-auth", filename],
                 cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -373,6 +392,7 @@ class Controller:
         show_output = include_output and not done and not s.stopping
         return {
             "sessionId": s.sid, "file": s.filename, "status": status,
+            "checkinOnly": is_checkin_only(s.filename),
             "loginUrl": s.url if show_output else "", "output": "\n".join(s.output) if show_output else "",
             "credentialCreated": (ROOT / s.filename).exists(),
         }
@@ -391,14 +411,30 @@ class Controller:
                 self._stop_login(s)
 
     def remove_account(self, filename: str) -> None:
-        if not FILE_RE.match(filename):
+        if not FILE_RE.fullmatch(filename):
             raise ValueError("凭据文件名无效")
-        src = ROOT / filename
-        if not src.is_file():
-            raise ValueError("凭据文件不存在")
-        disabled = ROOT / ".disabled"
-        disabled.mkdir(mode=0o700, exist_ok=True)
-        os.replace(src, disabled / filename)
+        with self._login_lock:
+            src = ROOT / filename
+            if not src.is_file():
+                raise ValueError("凭据文件不存在")
+            disabled = ROOT / ".disabled"
+            disabled.mkdir(mode=0o700, exist_ok=True)
+            os.replace(src, disabled / filename)
+
+    def set_account_pool(self, filename: str, *, checkin_only: bool) -> None:
+        if not FILE_RE.fullmatch(filename):
+            raise ValueError("凭据文件名无效")
+        with self._login_lock:
+            if not (ROOT / filename).is_file():
+                raise ValueError("凭据文件不存在")
+            with self._sessions_lock:
+                if any(s.filename == filename and s.finished_at is None for s in self.sessions.values()):
+                    raise ValueError("请等待扫码登录完成后再移动账号")
+            marker = checkin_only_marker(filename)
+            if checkin_only:
+                atomic(marker, b"checkin-only\n")
+            else:
+                marker.unlink(missing_ok=True)
 
     # ---------- check-in ----------
     def auto_checkin_enabled(self) -> bool:
@@ -421,6 +457,8 @@ class Controller:
     def manual_checkin(self, name: str) -> str:
         if not FILE_RE.fullmatch(name):
             raise ValueError("凭据文件名无效")
+        if is_checkin_only(name):
+            raise ValueError("代签到账号仅参与自动签到")
         with lock(ROOT):
             return request_manual_checkin(WEB_DATA / "manual-checkin.sock", name)
 
@@ -439,7 +477,8 @@ class Controller:
             results = {}
             for name in sorted(chosen):
                 state = rows.get(name, {}).get("checkin") or {}
-                if not FILE_RE.fullmatch(name) or state.get("date") != today or state.get("manualReady") is not True:
+                if (not FILE_RE.fullmatch(name) or is_checkin_only(name)
+                        or state.get("date") != today or state.get("manualReady") is not True):
                     continue
                 if day() != today:
                     results[name] = "已跨日，未尝试"

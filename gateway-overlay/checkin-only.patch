@@ -1,0 +1,89 @@
+diff --git a/debug.go b/debug.go
+index ece4aa7..1d17582 100644
+--- a/debug.go
++++ b/debug.go
+@@ -317,9 +317,32 @@ func buildModelAccountRules(config map[string]modelAccountFileConfig) (map[strin
+ 	return rules, nil
+ }
+ 
++func accountCheckinOnly(acc *Account) bool {
++	if acc == nil || acc.Path == "" {
++		return false
++	}
++	// The console writes the marker before login publishes the credential.
++	// Fail closed if its absence cannot be confirmed.
++	_, err := os.Lstat(acc.Path + ".checkin-only")
++	return !os.IsNotExist(err)
++}
++
+ // modelAccountAllowed 同时检查全局 all 与模型专属账号规则。
+ // 重名文件拒绝匹配，避免不同目录下同名凭据被一起误放行。
+ func modelAccountAllowed(model string, acc *Account, pool []*Account) (bool, string) {
++	if accountCheckinOnly(acc) {
++		return false, "仅用于自动签到"
++	}
++	// A second login for the same user must not bypass the check-in-only pool.
++	if acc != nil && acc.Auth != nil && acc.Auth.Account.UID != "" {
++		for _, other := range pool {
++			if other != nil && other != acc && other.Auth != nil &&
++				other.Auth.Account.UID == acc.Auth.Account.UID &&
++				other.Profile().Key == acc.Profile().Key && accountCheckinOnly(other) {
++				return false, "同一账号仅用于自动签到"
++			}
++		}
++	}
+ 	modelAccountFilterMu.RLock()
+ 	rule, configured := modelAccountFilters[normalizeModelName(model)]
+ 	global, globalConfigured := modelAccountFilters["all"]
+diff --git a/emptyrecovery.go b/emptyrecovery.go
+index 4fa0eb1..b89b818 100644
+--- a/emptyrecovery.go
++++ b/emptyrecovery.go
+@@ -258,7 +258,8 @@ func sendEmptyRecovery(r *http.Request, acc *Account, prof *upstreamProfile, raw
+ 		return nil, nextRequest, false, r.Context().Err()
+ 	}
+ 	accountMu.Lock()
+-	unavailable := acc.Disabled || acc.Auth == nil
++	allowed, _ := modelAccountAllowed(model, acc, accounts)
++	unavailable := acc.Disabled || acc.Auth == nil || !allowed
+ 	accountMu.Unlock()
+ 	if unavailable || r.Context().Err() != nil {
+ 		acc.lock.RUnlock()
+diff --git a/main.go b/main.go
+index 7309658..e479525 100644
+--- a/main.go
++++ b/main.go
+@@ -3603,12 +3603,16 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
+ 		accountMu.Lock()
+ 		disabled := acc.Disabled
+ 		disabledReason := acc.DisabledReason
++		allowed, schedulingReason := modelAccountAllowed(modelName, acc, accounts)
+ 		prof := acc.Profile()
+ 		accountMu.Unlock()
+-		if disabled {
++		if disabled || !allowed {
+ 			acc.lock.RUnlock()
+ 			releaseSlot()
+ 			lastAuthErr = disabledReason
++			if !allowed {
++				lastAuthErr = schedulingReason
++			}
+ 			continue
+ 		}
+ 
+diff --git a/probe.go b/probe.go
+index 124899b..c247891 100644
+--- a/probe.go
++++ b/probe.go
+@@ -133,7 +133,10 @@ func handleAdminProbe(w http.ResponseWriter, r *http.Request) {
+ 				log.Printf("[Probe] traceId=%s 模型=%s 结果=跳过 原因=模型已停用 说明=不会调用上游", debugTraceID(r), model)
+ 				continue
+ 			}
+-			if allowed, reason := modelAccountAllowed(model, acc, candidates); !allowed {
++			accountMu.Lock()
++			allowed, reason := modelAccountAllowed(model, acc, accounts)
++			accountMu.Unlock()
++			if !allowed {
+ 				result := probeResult{Account: acc.Path, Edition: acc.Profile().Key, Model: model, Status: "skipped", Detail: "账号名单排除：" + reason}
+ 				resp.Results = append(resp.Results, result)
+ 				resp.Summary[result.Status]++

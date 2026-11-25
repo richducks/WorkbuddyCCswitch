@@ -48,6 +48,9 @@ docker compose ps
 
 默认管理网页为 `http://127.0.0.1:8080/`，用户名 `admin`。首次启动生成的网页登录密码保存在私有文件 `data/web/web.token`；网关 API Key 和 CC Switch 用量 token 是另外两份凭据。
 
+启用角色权限时，在 `.env` 设置 `WB_CONSOLE_PERMISSIONS=1`，首次启动前将初始密码写入权限为 `0600` 的 `data/web/permissions-bootstrap`。用 `admin` 登录后按照页面提示更换为至少 6 位的新密码，数据库初始化完成后可移除初始密码文件。权限管理入口在控制台右上角，权限模式优先于本机免令牌配置。
+
+
 **可信局域网直接访问（可选，优先用 SSH 隧道）**：在 `.env` 中将 `BIND_IP` 改为 Docker 宿主机的具体私有 IPv4 地址，再运行 `docker compose up -d --build`。不支持 `0.0.0.0` 或公网地址。三个端口按配置发布到同一个地址：
 
 | 服务 | 访问地址（示例使用默认端口） | 凭据 |
@@ -88,6 +91,7 @@ ssh -NT -o ExitOnForwardFailure=yes \
 | 添加微信账号 | 点击后容器执行 `login -auth workbuddyN.json`，网页实时显示终端二维码和备用登录链接；本人用目标微信号扫码授权，凭据写入独立文件，网关热加载自动加入账号池 |
 | 一键签到 / 单号签到 | 处理尚未尝试的待签或漏签国内个人账号；批量逐个执行并显示各账号结果。跳过已签到、已尝试或正在签到的账号；无需重启网关。 |
 | 自动签到 | 网页开关默认开启，保存后立即生效并在容器重启后保留。关闭只暂停尚未开始的自动尝试，不影响手动签到。每个账号显示当天的计划签到或重试时间，以及最近实际尝试时间（北京时间）。 |
+| 代签到 | 可扫码添加，也可与微信账号池双向移动。代签到账号只参与自动签到，网关会从模型调用和价格探测中排除这些账号。移动保留签到记录 |
 | 改名 / 移除 | 备注只存本地标签文件；移除是把凭据移到 `data/gateway/.disabled/`，不删除文件 |
 | Hermes 对接 | 显示 `base_url`、默认模型、脱敏 API Key；可复制 provider JSON、配置命令和完整 Key |
 | 模型目录 | 自动从网关 `/v1/models` 读取全部模型（含上下文/输出上限）；复制的 provider JSON 已含全量模型；新增模型后可一键复制刷新命令同步到宿主机 Hermes |
@@ -171,7 +175,7 @@ python3 skill/scripts/deploy_workbuddy_ccswitch.py verify --dir . --inference-mo
 
 ## 限制
 
-- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，运行 `python3 scripts/build_gateway.py`（Go 1.26+，`--goarch amd64|arm64` 可覆盖目标架构，默认跟随本机）。脚本验证上游提交、应用 `gateway-overlay/` 两个补丁并运行签到与调度策略测试；升级前必须重新核对上游 `checkin.go`、`main.go` 选号逻辑与状态文件。
+- 二进制基于 **v1.14.47**；若要重建 `bin/workbuddy-gateway-manual`，运行 `python3 scripts/build_gateway.py`（Go 1.26+，`--goarch amd64|arm64` 可覆盖目标架构，默认跟随本机）。脚本验证上游提交、应用 `gateway-overlay/` 中的补丁并运行签到、调度策略和流式调用测试；升级前必须重新核对上游 `checkin.go`、`main.go` 选号逻辑与状态文件。
 - 扫码必须由账号本人在网页显示的二维码/链接上完成，无法自动化。
 - 账号池按可用性调度（当前为到期日最短优先，见上文），网页展示分账号信息不代表可在单次请求中固定使用某个账号。
 - 二维码登录进程默认等待 `LOGIN_TIMEOUT`（300 秒）；网页状态查询检测到超时后会终止该会话。

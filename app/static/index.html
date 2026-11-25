@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
+<meta name="wb-csrf" content="">
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Hermes 模型接入控制台</title>
 <style>
@@ -124,6 +125,7 @@
     <div class="nav-group">
       <div class="nav-title">账号与签到</div>
       <a href="#acctCard">微信账号池</a>
+      <a href="#checkinOnlyCard">代签到</a>
     </div>
     <div class="nav-group">
       <div class="nav-title">模型接入</div>
@@ -147,6 +149,8 @@
       <span class="pill" id="clock" title="网关报告的当前北京时间">--</span>
       <span class="pill" id="gwPill">网关检测中…</span>
       <span class="pill" id="verPill">--</span>
+      <a class="pill" id="permissionsLink" href="/security/" hidden>权限管理</a>
+      <a class="pill" id="logoutLink" href="/logout/" hidden>退出</a>
     </div>
   </header>
 
@@ -191,6 +195,23 @@
       </div>
       <div class="hint">北京时间：自动签到在 08:00–09:30 随机发起，失败在 09:30–10:00 按计划重试。具体计划和实际尝试时间见每个账号。关闭自动签到不影响手动操作。</div>
       <div class="hint" id="batchCheckinResults" aria-live="polite" style="white-space:pre-wrap" hidden></div>
+    </section>
+
+    <section class="card wide" id="checkinOnlyCard" hidden>
+      <h2>代签到 <span class="n" id="checkinOnlyCount"></span></h2>
+      <div class="hint">这些账号仅参加自动签到。移入微信账号池后，模型调用可以消耗其积分。</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>账号</th><th>来源 / 状态</th><th>额度（积分）</th><th>今日签到</th><th>操作</th></tr></thead>
+          <tbody id="checkinOnlyBody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="bar">
+        <button class="primary" id="addCheckinOnlyBtn">＋ 添加代签到账号</button>
+        <span class="spacer"></span>
+        <button id="refreshCheckinOnlyBtn">刷新状态</button>
+      </div>
+      <div class="hint" id="checkinOnlyAutoState" aria-live="polite"></div>
     </section>
 
     <section class="card" id="hermesCard">
@@ -254,8 +275,7 @@
 
 <div class="modal-bg" id="modalBg">
   <div class="modal">
-    <h3>添加微信账号</h3>
-    <div class="steps">新账号写入独立凭据文件，网关热加载后自动加入账号池。</div>
+    <h3 id="loginTitle">添加微信账号</h3>
     <div id="loginArea">
       <div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div>
       <div class="empty">点击上方按钮开始。二维码与登录链接只会显示在本地页面。</div>
@@ -286,12 +306,18 @@ function toast(msg, err=false) {
 }
 async function api(path, opts={}) {
   const r = await fetch(path, opts);
+  if (r.status === 401 && document.querySelector('meta[name="wb-csrf"]').content) {
+    location.assign('/login/?next=/');
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || (`HTTP ${r.status}`));
   return data;
 }
 function post(path, body) {
-  return api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+  const headers = {'Content-Type':'application/json'};
+  const csrf = document.querySelector('meta[name="wb-csrf"]').content;
+  if (csrf) headers['X-CSRFToken'] = csrf;
+  return api(path, {method:'POST', headers, body: JSON.stringify(body||{})});
 }
 function esc(s) {
   const d = document.createElement('div');
@@ -327,45 +353,60 @@ function badge(status, label) {
   return `<span class="badge ${cls}"><span class="dot"></span>${esc(label)}</span>`;
 }
 
+function renderAccounts(accounts, id, autoCheckinEnabled) {
+  $(`#${id}Count`).textContent = `共 ${accounts.length} 个`;
+  const body = $(`#${id}Body`);
+  if (!accounts.length) {
+    const action = id === 'acct' ? '添加微信账号' : '添加代签到账号';
+    body.innerHTML = `<tr><td colspan="5" class="empty">尚无账号，点击「${action}」扫码接入。${id === 'checkinOnly' ? '也可从「微信账号池」移入。' : ''}</td></tr>`;
+    return;
+  }
+  body.innerHTML = accounts.map((a) => {
+    const q = a.quota;
+    const quota = q && q.known
+      ? `<span class="quota">${fmtQuota(q.remaining)} / ${fmtQuota(q.total)}</span>`
+      : '<span class="empty" style="padding:0">—</span>';
+    const exp = q ? fmtExpire(q.expireAt) : null;
+    const source = `${esc(a.edition || '未加载')} · ${esc(a.state || (a.loaded ? '?' : '未加载'))}`;
+    const c = a.checkin;
+    const extra = c.attempts ? ` · ${esc(c.attempts)} 次` : '';
+    const chk = badge(c.status, c.label + extra);
+    const label = esc(a.label);
+    return `<tr>
+      <td><div>${label}</div><div class="file">${esc(a.file)}</div></td>
+      <td><div>${source}</div><div class="file">${a.loaded ? '已加载' : '文件存在，待热加载'}</div></td>
+      <td>${quota}${exp ? `<div class="file" style="margin-top:3px;${exp.cls ? `color:var(--${exp.cls})` : ''}">积分到期：${exp.text}</div>` : ''}</td>
+      <td>${chk}
+        ${autoCheckinEnabled && c.nextAt ? `<div class="file" style="margin-top:3px">计划${c.status === 'failed' ? '重试' : '签到'}：${fmtTime(c.nextAt)}</div>` : ''}
+        ${c.lastAt ? `<div class="file" style="margin-top:3px">${c.status === 'success' ? '签到时间' : '最近尝试'}：${fmtTime(c.lastAt)}</div>` : ''}
+      </td>
+      <td style="white-space:nowrap">
+        ${a.checkinOnly ? '' : `<button class="sm manualCheckinBtn" data-file="${esc(a.file)}" ${a.manualEligible && !checkinBusy?'':'disabled'} title="${a.manualEligible?'立即签到，无需重启网关':'当前状态不可手动签到'}">${c.status === 'missed' ? '补签' : '手动签到'}</button>`}
+        <button class="sm moveAccountBtn" data-file="${esc(a.file)}" data-label="${label}" data-checkin-only="${!a.checkinOnly}">${a.checkinOnly ? '移入微信账号池' : '移入代签到'}</button>
+        <button class="sm renameBtn" data-file="${esc(a.file)}" data-label="${label}">改名</button>
+        <button class="sm danger removeBtn" data-file="${esc(a.file)}">移除</button>
+      </td></tr>`;
+  }).join('');
+}
+
 function render(d) {
   summary = d;
+  const permissions = d.permissions;
+  $('#permissionsLink').hidden = !permissions?.admin;
+  $('#logoutLink').hidden = !permissions;
+  for (const id of ['addBtn', 'addCheckinOnlyBtn']) $(`#${id}`).hidden = permissions?.accounts === false;
+  $('#copyKeyBtn').hidden = permissions?.keys === false;
+  $('#checkinAllBtn').hidden = permissions?.checkin === false;
   $('#clock').textContent = d.now;
   const gp = $('#gwPill');
   gp.textContent = d.gatewayAlive ? '网关运行中' : '网关未运行';
   gp.className = 'pill ' + (d.gatewayAlive ? 'live' : 'off');
   $('#verPill').textContent = d.version;
-  $('#acctCount').textContent = `共 ${d.accounts.length} 个`;
-
-  const body = $('#acctBody');
-  if (!d.accounts.length) {
-    body.innerHTML = '<tr><td colspan="5" class="empty">尚无账号，点击「添加微信账号」扫码接入。</td></tr>';
-  } else {
-    body.innerHTML = d.accounts.map((a) => {
-      const q = a.quota;
-      const quota = q && q.known
-        ? `<span class="quota">${fmtQuota(q.remaining)} / ${fmtQuota(q.total)}</span>`
-        : '<span class="empty" style="padding:0">—</span>';
-      const exp = q ? fmtExpire(q.expireAt) : null;
-      const source = `${esc(a.edition || '未加载')} · ${esc(a.state || (a.loaded ? '?' : '未加载'))}`;
-      const c = a.checkin;
-      const extra = c.attempts ? ` · ${esc(c.attempts)} 次` : '';
-      const chk = badge(c.status, c.label + extra);
-      const label = esc(a.label);
-      return `<tr>
-        <td><div>${label}</div><div class="file">${esc(a.file)}</div></td>
-        <td><div>${source}</div><div class="file">${a.loaded ? '已加载' : '文件存在，待热加载'}</div></td>
-        <td>${quota}${exp ? `<div class="file" style="margin-top:3px;${exp.cls ? `color:var(--${exp.cls})` : ''}">积分到期：${exp.text}</div>` : ''}</td>
-        <td>${chk}
-          ${d.autoCheckinEnabled && c.nextAt ? `<div class="file" style="margin-top:3px">计划${c.status === 'failed' ? '重试' : '签到'}：${fmtTime(c.nextAt)}</div>` : ''}
-          ${c.lastAt ? `<div class="file" style="margin-top:3px">${c.status === 'success' ? '签到时间' : '最近尝试'}：${fmtTime(c.lastAt)}</div>` : ''}
-        </td>
-        <td style="white-space:nowrap">
-          <button class="sm manualCheckinBtn" data-file="${esc(a.file)}" ${a.manualEligible && !checkinBusy?'':'disabled'} title="${a.manualEligible?'立即签到，无需重启网关':'当前状态不可手动签到'}">${c.status === 'missed' ? '补签' : '手动签到'}</button>
-          <button class="sm renameBtn" data-file="${esc(a.file)}" data-label="${label}">改名</button>
-          <button class="sm danger removeBtn" data-file="${esc(a.file)}">移除</button>
-        </td></tr>`;
-    }).join('');
-  }
+  renderAccounts(d.accounts.filter(a => !a.checkinOnly), 'acct', d.autoCheckinEnabled);
+  renderAccounts(d.accounts.filter(a => a.checkinOnly), 'checkinOnly', d.autoCheckinEnabled);
+  $('#checkinOnlyAutoState').textContent = d.autoCheckinEnabled
+    ? '自动签到已开启，使用微信账号池的签到计划。'
+    : '自动签到已关闭，可在微信账号池中开启。';
 
   const h = d.hermes;
   $('#hEndpoint').textContent = h.endpoint;
@@ -381,10 +422,32 @@ function render(d) {
     ? models.map(m => `<code>${esc(m.id)}</code>`).join(' ')
     : '—';
 
-  document.querySelectorAll('.manualCheckinBtn').forEach(b => b.onclick = () => doManualCheckin(b.dataset.file));
+  document.querySelectorAll('.moveAccountBtn, .renameBtn, .removeBtn').forEach(b => {
+    b.hidden = permissions?.accounts === false;
+  });
+  document.querySelectorAll('.manualCheckinBtn').forEach(b => {
+    b.hidden = permissions?.checkin === false;
+    b.onclick = () => doManualCheckin(b.dataset.file);
+  });
   document.querySelectorAll('.renameBtn').forEach(b => b.onclick = () => {
     const next = prompt('新的显示名称（仅本地备注，不含账号标识）：', b.dataset.label);
     if (next && next.trim()) post('/api/labels', {file:b.dataset.file, label:next.trim()}).then(load).catch(e=>toast(e.message,true));
+  });
+  document.querySelectorAll('.moveAccountBtn').forEach(b => b.onclick = async () => {
+    const checkinOnly = b.dataset.checkinOnly === 'true';
+    const target = checkinOnly ? '代签到' : '微信账号池';
+    const effect = checkinOnly ? '该账号将仅参与自动签到，已发送的模型请求可能仍会消耗积分。' : '模型调用将可以消耗该账号的积分。';
+    if (!confirm(`将「${b.dataset.label}」移入${target}？${effect}`)) return;
+    b.disabled = true;
+    try {
+      await post('/api/accounts/move', {file:b.dataset.file, checkinOnly});
+      activateTab(navLinks.find(link => link.hash === (checkinOnly ? '#checkinOnlyCard' : '#acctCard')));
+      toast(`已移入${target}`);
+      await load();
+    } catch (e) {
+      b.disabled = false;
+      toast(e.message, true);
+    }
   });
   document.querySelectorAll('.removeBtn').forEach(b => b.onclick = () => {
     if (!confirm(`确认将 ${b.dataset.file} 移出账号池？凭据会移到私有 .disabled 目录，不会删除。`)) return;
@@ -394,7 +457,7 @@ function render(d) {
   $('#checkinAllBtn').disabled = checkinBusy || !signable;
   $('#checkinAllBtn').textContent = checkinBusy ? '签到中…' : `一键签到${signable ? `（${signable}）` : ''}`;
   $('#autoCheckinEnabled').checked = d.autoCheckinEnabled === true;
-  $('#autoCheckinEnabled').disabled = autoSettingsBusy;
+  $('#autoCheckinEnabled').disabled = autoSettingsBusy || permissions?.checkin_settings === false;
   $('#autoCheckinState').textContent = autoSettingsBusy ? '保存中…' : (d.autoCheckinEnabled ? '已开启' : '已关闭');
 }
 
@@ -476,13 +539,19 @@ async function copy(text, tip) {
   window.prompt('浏览器未允许自动复制，请手动复制：', text);
 }
 
-function resetLoginArea() {
-  $('#loginArea').innerHTML =
-    '<div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div><div class="empty">点击上方按钮开始。二维码与登录链接只会显示在本地页面。</div>';
-  $('#startLoginBtn').onclick = startLogin;
+function setLoginTitle(checkinOnly) {
+  $('#loginTitle').textContent = checkinOnly ? '添加代签到账号' : '添加微信账号';
 }
 
-function showLoginProgress(sid, file, generation) {
+function resetLoginArea(checkinOnly) {
+  setLoginTitle(checkinOnly);
+  $('#loginArea').innerHTML =
+    '<div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div><div class="empty">点击上方按钮开始。二维码与登录链接只会显示在本地页面。</div>';
+  $('#startLoginBtn').onclick = () => startLogin(checkinOnly);
+}
+
+function showLoginProgress(sid, file, generation, checkinOnly, activeCheckinOnly = checkinOnly) {
+  setLoginTitle(activeCheckinOnly);
   clearTimeout(pollTimer);
   $('#loginArea').innerHTML = `<div class="steps"><span class="step-num">1</span>用<b>目标微信号</b>扫描下方二维码</div>
     <pre id="qrBox">正在生成二维码…</pre>
@@ -499,7 +568,7 @@ function showLoginProgress(sid, file, generation) {
       const v = await api('/api/session?id=' + encodeURIComponent(sid));
       if (generation !== loginGeneration) return;
       if (v.status !== 'waiting') {
-        resetLoginArea();
+        resetLoginArea(checkinOnly);
         if (v.credentialCreated) toast('登录完成，账号已写入凭据文件');
         else if (cancel.disabled) toast('已取消登录');
         else toast(v.status === 'expired' ? '登录已超时' : '登录进程结束，未检测到新凭据', true);
@@ -520,20 +589,21 @@ function showLoginProgress(sid, file, generation) {
   poll();
 }
 
-async function startLogin() {
+async function startLogin(checkinOnly) {
   if (loginRequest) return;
   const generation = loginGeneration;
   const btn = $('#startLoginBtn'); btn.disabled = true; btn.textContent = '正在生成…';
-  loginRequest = post('/api/accounts');
+  loginRequest = post('/api/accounts', {checkinOnly});
   try {
     const s = await loginRequest;
-    if (generation === loginGeneration) showLoginProgress(s.sessionId, s.file, generation);
+    if (generation === loginGeneration) showLoginProgress(s.sessionId, s.file, generation, checkinOnly);
   } catch (e) {
-    if (generation === loginGeneration) { toast('无法开始登录：' + e.message, true); resetLoginArea(); }
+    if (generation === loginGeneration) { toast('无法开始登录：' + e.message, true); resetLoginArea(checkinOnly); }
   } finally { loginRequest = null; }
 }
 
-$('#addBtn').onclick = async () => {
+async function openLogin(checkinOnly) {
+  setLoginTitle(checkinOnly);
   const generation = ++loginGeneration;
   clearTimeout(pollTimer);
   $('#modalBg').style.display = 'flex';
@@ -543,14 +613,14 @@ $('#addBtn').onclick = async () => {
     const current = await api('/api/summary');
     if (generation !== loginGeneration) return;
     const sess = current.sessions?.find(x => x.status === 'waiting');
-    if (sess) showLoginProgress(sess.sessionId, sess.file, generation);
-    else resetLoginArea();
+    if (sess) showLoginProgress(sess.sessionId, sess.file, generation, checkinOnly, sess.checkinOnly);
+    else resetLoginArea(checkinOnly);
   } catch (e) {
     if (generation !== loginGeneration) return;
     $('#loginArea').textContent = '无法查询登录状态，请关闭后重试。';
     toast(e.message, true);
   }
-};
+}
 $('#closeModalBtn').onclick = () => {
   ++loginGeneration;
   clearTimeout(pollTimer);
@@ -559,6 +629,9 @@ $('#closeModalBtn').onclick = () => {
 };
 $('#modalBg').onclick = (e) => { if (e.target === $('#modalBg')) $('#closeModalBtn').click(); };
 $('#refreshBtn').onclick = () => load(true);
+$('#addBtn').onclick = () => openLogin(false);
+$('#addCheckinOnlyBtn').onclick = () => openLogin(true);
+$('#refreshCheckinOnlyBtn').onclick = () => load(true);
 $('#checkinAllBtn').onclick = doBatchCheckin;
 $('#autoCheckinEnabled').onchange = e => saveAutoCheckin(e.target.checked);
 $('#copyProviderBtn').onclick = () => copy(JSON.stringify(summary?.hermes.providerEntry, null, 2), 'provider JSON 已复制');

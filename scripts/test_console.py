@@ -31,6 +31,64 @@ class ConsoleTests(unittest.TestCase):
         (self.root / "workbuddy-status.json").write_text('{"accounts": [], "updatedAt": 0}')
         self.console = ctrl.Controller(SimpleNamespace(version="test", alive=lambda: True))
 
+    def test_checkin_only_marker_precedes_login_and_promotion_preserves_credential(self):
+        name = "workbuddy2.json"
+        credential = self.root / name
+        marker = self.root / (name + ".checkin-only")
+
+        def login(*args, **kwargs):
+            self.assertTrue(marker.is_file())
+            credential.write_text("fixture")
+            return Mock(stdout=io.StringIO(), poll=lambda: 0)
+
+        def run_pump(*, target, args, daemon):
+            return SimpleNamespace(start=lambda: target(*args))
+
+        with patch.object(ctrl.subprocess, "Popen", side_effect=login), patch.object(
+            ctrl.threading, "Thread", side_effect=run_pump
+        ):
+            self.assertEqual(self.console.add_account(checkin_only=True)["file"], name)
+        with self.assertRaisesRegex(ValueError, "仅参与自动签到"):
+            self.console.manual_checkin(name)
+        with patch.object(self.console, "hermes", return_value={}), patch.object(
+            self.console, "model_catalog", return_value=[]
+        ):
+            self.assertTrue(self.console.status()["accounts"][0]["checkinOnly"])
+            self.console.set_account_pool(name, checkin_only=False)
+            self.assertFalse(self.console.status()["accounts"][0]["checkinOnly"])
+            self.console.set_account_pool(name, checkin_only=True)
+            self.assertTrue(self.console.status()["accounts"][0]["checkinOnly"])
+            self.assertEqual(credential.read_text(), "fixture")
+            self.console.set_account_pool(name, checkin_only=False)
+            self.assertFalse(self.console.status()["accounts"][0]["checkinOnly"])
+        self.assertEqual(credential.read_text(), "fixture")
+        self.assertFalse(marker.exists())
+
+    def test_permissions_mode_never_falls_back_to_legacy(self):
+        with patch.dict(ctrl.os.environ, {"WB_CONSOLE_PERMISSIONS": "1", "WB_CONSOLE_NOAUTH": "1"}):
+            with patch.object(boot, "build_permissions_server", side_effect=RuntimeError("bootstrap failed")):
+                with self.assertRaisesRegex(RuntimeError, "bootstrap failed"):
+                    boot.console_server(self.console, "fixture-token")
+
+    def test_tokenless_console_requires_loopback_binding_and_host(self):
+        import web
+        from email.message import Message
+
+        handler = object.__new__(web.Handler)
+        handler.headers = Message()
+        handler.headers["Host"] = "127.0.0.1:18080"
+        handler._auth = lambda: False
+        handler._cookie_auth = lambda: False
+        with patch.object(web, "NOAUTH", True), patch.object(web, "HOST_BIND_IP", "127.0.0.1"):
+            self.assertTrue(handler._authed())
+            handler.headers.replace_header("Host", "external.example:18080")
+            self.assertFalse(handler._authed())
+        handler.headers.replace_header("Host", "127.0.0.1:18080")
+        with patch.object(web, "NOAUTH", True), patch.object(web, "HOST_BIND_IP", "192.168.1.2"):
+            self.assertFalse(handler._authed())
+        with patch.object(web, "NOAUTH", False), patch.object(web, "HOST_BIND_IP", "127.0.0.1"):
+            self.assertFalse(handler._authed())
+
     def test_catalog_serves_cache_without_starting_a_second_refresh(self):
         started = threading.Event()
         release = threading.Event()

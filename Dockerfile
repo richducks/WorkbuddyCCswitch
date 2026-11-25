@@ -17,6 +17,8 @@ RUN groupadd -g "${GID}" wb \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY requirements-permissions.txt /app/requirements-permissions.txt
+RUN pip install --no-cache-dir -r /app/requirements-permissions.txt
 COPY bin/workbuddy-gateway-manual /app/bin/workbuddy-gateway
 COPY config/config.json.example /app/config/config.json.example
 COPY app/ /app/app/

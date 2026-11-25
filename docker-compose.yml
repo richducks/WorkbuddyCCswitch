@@ -18,6 +18,8 @@ services:
       HOST_GW_PORT: "${HOST_GW_PORT:-8317}"
       BRIDGE_PORT: "8318"
       WEB_PORT: "8080"
+      WB_CONSOLE_PERMISSIONS: "${WB_CONSOLE_PERMISSIONS:-0}"
+      WB_CONSOLE_NOAUTH: "${WB_CONSOLE_NOAUTH:-0}"
       HOST_WEB_PORT: "${HOST_WEB_PORT:-8080}"
       HOST_BRIDGE_PORT: "${HOST_BRIDGE_PORT:-8318}"
       LOGIN_TIMEOUT: "300"
@@ -29,7 +31,7 @@ services:
       - ./data/gateway:/data/gateway
       - ./data/web:/data/web
     healthcheck:
-      test: ["CMD", "python3", "-c", "import base64,json,urllib.request; t=open('/data/web/web.token').read().strip(); h={'Authorization':('Bas'+'ic ')+base64.b64encode(('admin:'+t).encode()).decode()}; d=json.load(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/api/summary',headers=h),timeout=5)); assert d.get('gatewayAlive')"]
+      test: ["CMD", "python3", "-c", "import base64,json,os,urllib.request; permissions=os.environ.get('WB_CONSOLE_PERMISSIONS')=='1'; local=os.environ.get('WB_CONSOLE_NOAUTH')=='1' and os.environ.get('HOST_BIND_IP')=='127.0.0.1'; h={} if permissions or local else {'Authorization':'Basic '+base64.b64encode(('admin:'+open('/data/web/web.token').read().strip()).encode()).decode()}; url='http://127.0.0.1:8080'+('/healthz' if permissions else '/api/summary'); r=urllib.request.urlopen(urllib.request.Request(url,headers=h),timeout=5); assert permissions or json.load(r).get('gatewayAlive')"]
       interval: 30s
       timeout: 8s
       retries: 3

@@ -16,7 +16,8 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from controller import Controller
+from controller import HOST_BIND_IP, Controller
+from console_routes import dispatch_console_api
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -32,7 +33,7 @@ def _check_origin(handler: "Handler") -> bool:
 
 SESSION_COOKIE = "wb_session"
 SESSION_TTL = 12 * 3600
-# 测试阶段可设 WB_CONSOLE_NOAUTH=1 关闭登录（仅限绑定回环地址时使用）；恢复鉴权移除该变量即可
+# 仅对明确开启免令牌访问的本机控制台生效。
 NOAUTH = os.environ.get("WB_CONSOLE_NOAUTH") == "1"
 
 
@@ -69,8 +70,12 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         return True
 
+    def _local_noauth(self) -> bool:
+        host = self.headers.get("Host", "").partition(":")[0].lower()
+        return NOAUTH and HOST_BIND_IP == "127.0.0.1" and host in ("127.0.0.1", "localhost")
+
     def _authed(self) -> bool:
-        if NOAUTH:
+        if self._local_noauth():
             return True
         return self._auth() or self._cookie_auth()
 
@@ -159,16 +164,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path in ("/", "/index.html"):
                 return self._send(200, (STATIC / "index.html").read_text(encoding="utf-8"), "text/html; charset=utf-8")
-            if u.path == "/api/summary":
-                return self._send(200, cast(ConsoleServer, self.server).controller.status())
-            if u.path == "/api/session":
-                sid = parse_qs(u.query).get("id", [""])[0]
-                return self._send(200, cast(ConsoleServer, self.server).controller.get_session(sid))
-            if u.path == "/api/hermes/key":
-                return self._send(200, {"apiKey": cast(ConsoleServer, self.server).controller.api_key()})
-            if u.path == "/api/providers":
-                registry = cast(ConsoleServer, self.server).controller.provider_registry
-                return self._send(200, {"providers": registry.list()})
+            if u.path.startswith("/api/"):
+                status, body = dispatch_console_api(self.server.controller, "GET", u.path, parse_qs(u.query), {})
+                return self._send(status, body)
             if u.path == "/providers.js":
                 return self._send(200, (STATIC / "providers.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8")
             self._send(404, {"error": "not found"})
@@ -186,46 +184,13 @@ class Handler(BaseHTTPRequestHandler):
         if not _check_origin(self):
             return self._send(403, {"error": "跨站请求被拒绝"})
         try:
+            if self._local_noauth() and self.headers.get_content_type() != "application/json":
+                return self._send(415, {"error": "本机免令牌请求须以 JSON 提交"})
             if u.path.startswith("/api/providers/") and self.headers.get_content_type() != "application/json":
                 return self._send(415, {"error": "提供商配置须以 JSON 提交"})
             data = self._body()
-            c = cast(ConsoleServer, self.server).controller
-            if u.path in ("/api/providers/add", "/api/providers/edit"):
-                return self._send(200, {"provider": c.provider_registry.save(data, create=u.path.endswith("/add"))})
-            if u.path == "/api/providers/remove":
-                if not isinstance(data, dict) or data.keys() != {"id"}:
-                    raise ValueError("请选择要移除的提供商")
-                c.provider_registry.remove(data["id"])
-                return self._send(200, {"ok": True})
-            if u.path == "/api/accounts":
-                return self._send(200, c.add_account())
-            if u.path == "/api/session/cancel":
-                c.cancel_session(str(data.get("sessionId", "")))
-                return self._send(200, {"ok": True})
-            if u.path == "/api/accounts/remove":
-                c.remove_account(str(data.get("file", "")))
-                return self._send(200, {"ok": True})
-            if u.path == "/api/labels":
-                c.set_label(str(data.get("file", "")), str(data.get("label", "")))
-                return self._send(200, {"ok": True})
-            if u.path == "/api/checkin/manual":
-                name = data.get("file")
-                if not isinstance(name, str):
-                    raise ValueError("请选择账号")
-                return self._send(200, {"result": c.manual_checkin(name)})
-            if u.path == "/api/checkin/all":
-                return self._send(200, {"results": c.checkin_all()})
-            if u.path == "/api/checkin/settings":
-                enabled = data.get("enabled")
-                if not isinstance(enabled, bool):
-                    raise ValueError("自动签到开关必须为布尔值")
-                return self._send(200, {"enabled": c.set_auto_checkin(enabled)})
-            if u.path == "/api/checkin":
-                files = data.get("files")
-                if not isinstance(files, list) or not files:
-                    raise ValueError("请选择账号")
-                return self._send(200, {"results": c.checkin_all([str(x) for x in files])})
-            self._send(404, {"error": "not found"})
+            status, body = dispatch_console_api(self.server.controller, "POST", u.path, {}, data)
+            self._send(status, body)
         except ValueError as e:
             self._send(400, {"error": str(e)})
         except Exception as e:

@@ -71,10 +71,33 @@ def init() -> tuple[str, str]:
     return web_token, bridge_token
 
 
+def build_permissions_server(controller: Controller):
+    from waitress import create_server
+
+    from permissions import build_permissions_app
+
+    try:
+        bootstrap_password = private_read(WEB_DATA / "permissions-bootstrap").rstrip("\r\n")
+    except FileNotFoundError:
+        bootstrap_password = None
+    app = build_permissions_app(controller, WEB_DATA, bootstrap_password=bootstrap_password, bind_ip=HOST_BIND_IP)
+    return create_server(app, host="0.0.0.0", port=int(os.environ.get("WEB_PORT", "8080")),
+                         max_request_body_size=1_000_000)
+
+
+def console_server(controller: Controller, web_token: str):
+    if os.environ.get("WB_CONSOLE_PERMISSIONS") == "1":
+        return build_permissions_server(controller), True
+    from web import build_web_server
+
+    return build_web_server(controller, web_token), False
+
+
 def main() -> None:
     web_token, bridge_token = init()
     gateway = Gateway()
     controller = Controller(gateway)
+    httpd, permissions_enabled = console_server(controller, web_token)
     gateway.start()
     threading.Thread(target=gateway.supervise, daemon=True, name="gateway-supervisor").start()
     print(f"[boot] gateway {gateway.version} started (supervisor active)", flush=True)
@@ -83,25 +106,32 @@ def main() -> None:
     threading.Thread(target=bridge.serve_forever, daemon=True, name="quota-bridge").start()
     print(f"[boot] quota bridge on 0.0.0.0:{BRIDGE_PORT}/usage", flush=True)
 
-    from web import build_web_server
-    httpd = build_web_server(controller, web_token)
     print("=" * 56, flush=True)
     print(f"WEB_CONSOLE_URL = http://{HOST_BIND_IP}:{os.environ.get('HOST_WEB_PORT', '8080')}/", flush=True)
     print(f"WEB_CONSOLE_USER = admin", flush=True)
-    print("WEB_CONSOLE_TOKEN_FILE = /data/web/web.token", flush=True)
+    if not permissions_enabled:
+        print("WEB_CONSOLE_TOKEN_FILE = /data/web/web.token", flush=True)
     print("=" * 56, flush=True)
 
     def stop(*_args):
+        if permissions_enabled:
+            raise KeyboardInterrupt
         threading.Thread(target=httpd.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        httpd.serve_forever(poll_interval=0.5)
+        if permissions_enabled:
+            httpd.run()
+        else:
+            httpd.serve_forever(poll_interval=0.5)
     finally:
         bridge.shutdown()
         gateway.shutdown()
-        httpd.server_close()
+        if permissions_enabled:
+            httpd.close()
+        else:
+            httpd.server_close()
 
 
 if __name__ == "__main__":
