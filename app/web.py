@@ -49,7 +49,8 @@ class Handler(BaseHTTPRequestHandler):
             user, _, password = raw.partition(":")
         except Exception:
             return False
-        return user == "admin" and hmac.compare_digest(password, cast(ConsoleServer, self.server).token)
+        return (user == "admin" and password.isascii()
+                and hmac.compare_digest(password, cast(ConsoleServer, self.server).token))
 
     def _cookie_auth(self) -> bool:
         sid = None
@@ -108,7 +109,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": str(e)})
         srv = cast(ConsoleServer, self.server)
         token = data.get("token")
-        if not isinstance(token, str) or not hmac.compare_digest(token, srv.token):
+        if not isinstance(token, str) or not token.isascii() or not hmac.compare_digest(token, srv.token):
             time.sleep(0.4)  # 轻微延迟，增加在线爆破成本
             return self._send(401, {"error": "令牌错误"})
         sid = secrets.token_urlsafe(32)

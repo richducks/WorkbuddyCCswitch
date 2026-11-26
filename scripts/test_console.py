@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Offline regressions for the console. No real credentials or gateway."""
+import base64
 import importlib
 import io
 import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,6 +72,67 @@ class ConsoleTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "bootstrap failed"):
                     boot.console_server(self.console, "fixture-token")
 
+    def test_stale_snapshot_cannot_confirm_today_checkin_or_growth(self):
+        now = time.time()
+        account = {
+            "path": "workbuddy.json", "uid": "fixture", "edition": "cn", "state": "active",
+            "checkin": {"date": ctrl.day(), "status": "success"},
+            "growth": {"updatedAt": now, "checkedIn": True},
+        }
+        for updated, label in ((now - 60, "今日未确认"), (now, "已签到")):
+            with self.subTest(updated=updated), patch.object(
+                self.console, "_status_doc", return_value={"updatedAt": updated, "accounts": [account]}
+            ):
+                row = self.console.status()["accounts"][0]
+                self.assertEqual(row["checkin"]["label"], label)
+                self.assertEqual(row["growth"], account["growth"] if updated == now else None)
+
+    def test_credit_batches_are_not_inferred_from_legacy_expiry_or_stale_snapshots(self):
+        now = time.time()
+        account = {"path": "workbuddy.json", "quotaKnown": True, "quotaExpireAt": now + 3600}
+        batch = {"name": "奖励积分", "total": 50, "used": 25, "remaining": 25, "expiresAt": now + 600}
+        for updated, details, expected in ((now, {}, []), (now, {"creditBatches": [batch]}, [batch]),
+                                           (now - 60, {"creditBatches": [batch]}, [])):
+            with self.subTest(updated=updated, details=details), patch.object(
+                self.console, "_status_doc", return_value={"updatedAt": updated, "accounts": [account | details]}
+            ):
+                self.assertEqual(self.console.status()["accounts"][0]["quota"]["batches"], expected)
+
+    def test_account_auto_checkin_overrides_legacy_default_and_survives_move(self):
+        from console_routes import dispatch_console_api
+
+        first, second = "workbuddy.json", "workbuddy2.json"
+        for name in (first, second):
+            (self.root / name).write_text("{}")
+        self.console.set_auto_checkin(False)
+        self.assertEqual(dispatch_console_api(self.console, "POST", "/api/checkin/settings", {},
+                                              {"file": first, "enabled": True}), (200, {"enabled": True}))
+        self.console.set_account_pool(first, checkin_only=True)
+        saved = ctrl.Controller(self.console.gateway)
+        self.assertEqual({a["file"]: a["autoCheckinEnabled"] for a in saved.status()["accounts"]},
+                         {first: True, second: False})
+        saved.set_auto_checkin(True)
+        dispatch_console_api(saved, "POST", "/api/checkin/settings", {}, {"file": first, "enabled": False})
+        self.assertEqual({a["file"]: a["autoCheckinEnabled"] for a in saved.status()["accounts"]},
+                         {first: False, second: True})
+        with self.assertRaises(ValueError):
+            dispatch_console_api(saved, "POST", "/api/checkin/settings", {},
+                                 {"file": "workbuddy3.json", "enabled": True})
+
+    def test_failed_scheduling_write_preserves_previous_config(self):
+        for setter, path, initial, update, expected in (
+            (self.console.set_reserve, self.console.reserves_path, 25, 30, 25),
+            (self.console.set_pin, self.console.pins_path, True, False, 1),
+        ):
+            with self.subTest(path=path.name):
+                name = "workbuddy.json"
+                setter(name, initial)
+                with patch.object(ctrl.os, "fsync", side_effect=OSError("disk full")):
+                    with self.assertRaisesRegex(OSError, "disk full"):
+                        setter(name, update)
+                self.assertEqual(json.loads(path.read_bytes()), {name: expected})
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_tokenless_console_requires_loopback_binding_and_host(self):
         import web
         from email.message import Message
@@ -88,6 +151,25 @@ class ConsoleTests(unittest.TestCase):
             self.assertFalse(handler._authed())
         with patch.object(web, "NOAUTH", False), patch.object(web, "HOST_BIND_IP", "127.0.0.1"):
             self.assertFalse(handler._authed())
+
+    def test_non_ascii_login_tokens_are_rejected_without_crashing(self):
+        import web
+
+        handler = object.__new__(web.Handler)
+        handler.server = SimpleNamespace(token="fixture-token")
+        handler.headers = {"Authorization": "Basic " + base64.b64encode("admin:中文".encode()).decode()}
+        self.assertFalse(handler._auth())
+        handler._body = lambda: {"token": "中文"}
+        handler._send = Mock()
+        with patch.object(web, "_check_origin", return_value=True), patch.object(web.time, "sleep"):
+            handler._handle_login()
+        handler._send.assert_called_once_with(401, {"error": "令牌错误"})
+
+    def test_existing_blank_token_fails_closed(self):
+        token = self.web / "web.token"
+        token.write_text("\n")
+        with self.assertRaisesRegex(ValueError, "令牌文件为空"):
+            boot.ensure_token(token)
 
     def test_catalog_serves_cache_without_starting_a_second_refresh(self):
         started = threading.Event()

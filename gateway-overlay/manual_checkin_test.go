@@ -102,6 +102,35 @@ func TestCheckinMaintenanceRestartKeepsFutureSchedule(t *testing.T) {
 	}
 }
 
+func TestCheckinAutomaticCatchupRejectsStaleDayAndFuturePlan(t *testing.T) {
+	now := time.Date(2026, 1, 2, 8, 15, 0, 0, checkinZone)
+	_, retry, _ := checkinWindows(now)
+	s := newDailyCheckinScheduler(filepath.Join(t.TempDir(), "checkin-state.json"))
+	s.now = func() time.Time { return now }
+	s.loaded = true
+	target := checkinTarget{key: strings.Repeat("a", 64), eligible: true}
+	plan := &checkinRecord{Status: "pending", FirstAt: now.Add(time.Minute).UnixMilli(), RetryAt: retry.UnixMilli()}
+	s.doc = checkinDocument{Schema: 1, Date: checkinDay(now), Plans: map[string]*checkinRecord{target.key: plan}}
+	for _, day := range []string{"2026-01-01", checkinDay(now)} {
+		if _, code := s.claimCheckin(target, day); code != http.StatusConflict || plan.Attempts != 0 {
+			t.Fatalf("未到时间或隔日的自动补领不应占用签到尝试: day=%s code=%d", day, code)
+		}
+	}
+	now = now.Add(2 * time.Minute)
+	if _, code := s.claimCheckin(target, checkinDay(now)); code != http.StatusOK || plan.Attempts != 1 {
+		t.Fatalf("同日到点应允许补领: %d", code)
+	}
+}
+
+func TestGrowthStatusRejectsNonFiniteCredit(t *testing.T) {
+	for _, v := range []string{`"NaN"`, `"Inf"`, `-1`} {
+		var value upstreamGrowthStatus
+		if json.Unmarshal([]byte(`{"active":true,"today_credit":`+v+`}`), &value) == nil {
+			t.Fatalf("无效积分值不能写入状态快照: %s", v)
+		}
+	}
+}
+
 func TestCheckinAutoSwitchGatesAttemptsButNotManual(t *testing.T) {
 	now := time.Date(2026, 1, 2, 8, 15, 0, 0, checkinZone)
 	_, retry, _ := checkinWindows(now)
@@ -132,5 +161,43 @@ func TestCheckinAutoSwitchGatesAttemptsButNotManual(t *testing.T) {
 	}
 	if got := s.planAndClaim(now, []checkinTarget{a, b}, false); len(got) != 1 || got[0].key != b.key || pa.Attempts != 1 {
 		t.Fatal("enabling did not restore automatic scheduling without duplicating a manual claim")
+	}
+}
+
+func TestCheckinPerAccountSwitch(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("WB_AUTO_CHECKIN_DISABLED_FILE", "auto-checkin.disabled")
+	now := time.Date(2026, 1, 2, 8, 15, 0, 0, checkinZone)
+	_, retry, _ := checkinWindows(now)
+	a := checkinTarget{key: strings.Repeat("a", 64), eligible: true, account: &Account{Path: "workbuddy.json"}}
+	b := checkinTarget{key: strings.Repeat("b", 64), eligible: true, account: &Account{Path: "workbuddy2.json"}}
+	write := func(path, value string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, startup := range []bool{false, true} {
+		write("workbuddy.json.auto-checkin", "disabled\n")
+		s := newDailyCheckinScheduler(filepath.Join(t.TempDir(), "checkin-state.json"))
+		s.now = func() time.Time { return now }
+		plan := checkinRecord{Status: "pending", FirstAt: now.UnixMilli(), RetryAt: retry.UnixMilli()}
+		pa, pb := plan, plan
+		s.loaded = true
+		s.doc = checkinDocument{Schema: 1, Date: checkinDay(now), Plans: map[string]*checkinRecord{a.key: &pa, b.key: &pb}}
+		if jobs := s.planAndClaim(now, []checkinTarget{a, b}, startup); len(jobs) != 1 || jobs[0].key != b.key || pa.Attempts != 0 {
+			t.Fatalf("startup=%v: expected only the enabled account to start", startup)
+		}
+		if _, code := s.claimCheckin(a, checkinDay(now)); code != http.StatusConflict || pa.Attempts != 0 {
+			t.Fatalf("disabled account still claimed for automatic catch-up: %d", code)
+		}
+		if _, code := s.claimManualCheckin(a); code != http.StatusOK {
+			t.Fatalf("disabled auto check-in blocked manual check-in: %d", code)
+		}
+	}
+	write("auto-checkin.disabled", "")
+	write("workbuddy.json.auto-checkin", "enabled\n")
+	if !accountAutomaticCheckinEnabled(a) || accountAutomaticCheckinEnabled(b) {
+		t.Fatal("per-account enable did not override the legacy default")
 	}
 }

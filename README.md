@@ -50,6 +50,24 @@ docker compose ps
 
 启用角色权限时，在 `.env` 设置 `WB_CONSOLE_PERMISSIONS=1`，首次启动前将初始密码写入权限为 `0600` 的 `data/web/permissions-bootstrap`。用 `admin` 登录后按照页面提示更换为至少 6 位的新密码，数据库初始化完成后可移除初始密码文件。权限管理入口在控制台右上角，权限模式优先于本机免令牌配置。
 
+### 在 Linux 上重建现有容器
+
+在本机终端进入现有部署目录，先核对容器所属项目和数据挂载：
+
+```bash
+sudo docker inspect workbuddy-hermes --format '部署目录: {{index .Config.Labels "com.docker.compose.project.working_dir"}}{{range .Mounts}}{{println}}{{.Source}} -> {{.Destination}}{{end}}'
+```
+
+确认部署目录是当前目录，且 `data/gateway` 与 `data/web` 分别挂载到 `/data/gateway` 和 `/data/web`；目录不一致时先切到实际部署目录，不要用另一套空数据重建。如果网关补丁有更新，先运行 `python3 scripts/build_gateway.py`。备份本地数据后，重建并验证：
+
+```bash
+sudo docker compose up -d --build --wait workbuddy-hermes &&
+sudo docker compose exec -T workbuddy-hermes \
+  grep -n 'account-title-height' /app/app/static/index.html
+```
+
+如果本机的 `docker ps` 不需要 sudo，可以省略 sudo。无需放宽 Docker socket 权限。重建后刷新原控制台地址并检查账号池向上、向下滚动时标题保持可见。
+
 
 **可信局域网直接访问（可选，优先用 SSH 隧道）**：在 `.env` 中将 `BIND_IP` 改为 Docker 宿主机的具体私有 IPv4 地址，再运行 `docker compose up -d --build`。不支持 `0.0.0.0` 或公网地址。三个端口按配置发布到同一个地址：
 
@@ -87,12 +105,12 @@ ssh -NT -o ExitOnForwardFailure=yes \
 | 区域 | 内容 |
 |---|---|
 | 模型提供商 | WorkBuddy 作为内置项；其他服务可新增、编辑、移除接入预设，并导出命名的 Hermes 配置命令 |
-| 微信账号池 | 逐号显示凭据文件名、可自定义备注、加载状态、额度、积分到期时间（≤3 天高亮）、今日签到徽章（已签到 / 未签到 / 签到失败 / 待签到）、最近签到时间 |
+| 微信账号池 | 逐号显示凭据文件名、可自定义备注、加载状态、额度及分批已用、剩余和到期时间（≤3 天高亮）、今日签到徽章（已签到 / 未签到 / 签到失败 / 待签到）、最近签到时间 |
 | 添加微信账号 | 点击后容器执行 `login -auth workbuddyN.json`，网页实时显示终端二维码和备用登录链接；本人用目标微信号扫码授权，凭据写入独立文件，网关热加载自动加入账号池 |
 | 一键签到 / 单号签到 | 处理尚未尝试的待签或漏签国内个人账号；批量逐个执行并显示各账号结果。跳过已签到、已尝试或正在签到的账号；无需重启网关。 |
-| 自动签到 | 网页开关默认开启，保存后立即生效并在容器重启后保留。关闭只暂停尚未开始的自动尝试，不影响手动签到。每个账号显示当天的计划签到或重试时间，以及最近实际尝试时间（北京时间）。 |
+| 自动签到 | 在账号所在行勾选，仅影响该账号的自动签到与自动补领，不影响手动签到。设置在重启和移入另一账号池后保留；首次升级时未单独设置的账号继承原全局状态。 |
 | 代签到 | 可扫码添加，也可与微信账号池双向移动。代签到账号只参与自动签到，网关会从模型调用和价格探测中排除这些账号。移动保留签到记录 |
-| 改名 / 移除 | 备注只存本地标签文件；移除是把凭据移到 `data/gateway/.disabled/`，不删除文件 |
+| 改名 / 移除 | 点击账号名称编辑，备注只存本地标签文件；移除是把凭据移到 `data/gateway/.disabled/`，不删除文件 |
 | Hermes 对接 | 显示 `base_url`、默认模型、脱敏 API Key；可复制 provider JSON、配置命令和完整 Key |
 | 模型目录 | 自动从网关 `/v1/models` 读取全部模型（含上下文/输出上限）；复制的 provider JSON 已含全量模型；新增模型后可一键复制刷新命令同步到宿主机 Hermes |
 | 用量桥 | 显示 CC Switch 应填写的 Base URL；用量刷新只读，不触发签到 |
@@ -133,11 +151,14 @@ python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 p
 - 「补签」与「手动签到」均经同一个本地签到执行器，不清零已用尝试次数；启动补签已排队且自动签到开启时，等待原队列执行。接近北京时间午夜不发起跨日请求。
 - 关闭自动签到后，已发出的请求不会被取消；重新开启不会改写已有计划。主机休眠期间不会执行自动签到。
 
-## 调度策略：到期日最短优先（expireFirst）
+签到以外的积分，在 WorkBuddy 官方客户端头像菜单的「Buddy 加油站」「去邀约」「成长计划」，或[个人中心 → 套餐与用量](https://www.workbuddy.cn/profile/plans-usage)按当前账号的资格领取。成长计划中仅标为积分的奖励可计入余额，能量不是积分。已接入账号的官方余额由网关定期查询并同步到控制台和 CC Switch，不需要手工录入；「刷新状态」只是读取最近的网关快照，不会领取奖励。
 
-- 容器环境变量 `WB_SCHEDULING_STRATEGY=expireFirst` 开启（仓库默认已开）：同优先级可用账号不再轮换，而是固定选「积分周期到期最早」的账号，把它先用完再自然落到下一个；到期相同/未知时退回轮询顺序。缺省或删除该变量即恢复上游轮询行为。
-- 到期时间来自上游完整权益接口中每个有效资源包的扣减周期截止，按 `DeductionEndTime > ExpiredTime > CycleEndTime` 取最早的一个，额度周期刷新后自动更新；账号级展示在状态快照的 `quotaExpireAt` 字段。
-- 选号层级保持上游语义（免费耗尽账号优先 → 有余额账号 → 零余额受控探测），expireFirst 只在每一层级内部比较到期时间；账号黑白名单、冷却与失效排除规则不受影响。
+## 调度策略：有余额的积分批次到期优先（expireFirst）
+
+- 容器默认开启 `WB_SCHEDULING_STRATEGY=expireFirst`。在同一调度层级中，置顶规则不变；普通候选按尚有余额的有效积分批次最早失效时间排序，到期相同或均未知时按轮询。关闭该变量后不按到期排序。
+- 控制台可展开查看上游已确认的批次总额、已用、剩余和到期时间。批次截止取积分周期和权益截止中较早的时间，不用套餐日期代替批次余额。已耗尽、已过期、数据缺失或过旧的批次不参与到期排序。
+- 只影响网关选择哪个账号；实际扣减批次由 WorkBuddy 决定。免费、普通、零余额探测层级及保留积分、黑白名单、冷却和失效规则不变。
+- 未单独设置的账号默认保留 100 积分，已知余额低于保留值时不进入调度；要允许该账号参与零余额免费模型或探测，先将其保留积分设为 `0`。
 
 ## 验证
 
@@ -145,6 +166,7 @@ python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 p
 python3 -B scripts/selftest.py          # 不触碰真实账号
 python3 -B scripts/test_providers.py    # 自定义提供商持久化、校验与命令导出
 python3 -B scripts/test_console.py      # 守护退避、缓存并发、登录会话与日志修剪
+python3 -B scripts/test_permissions.py  # 先在虚拟环境安装 requirements-permissions.txt
 python3 -B scripts/test_inference_probe.py # 流式结束、错误帧及模型匹配
 docker compose config --quiet
 docker compose ps

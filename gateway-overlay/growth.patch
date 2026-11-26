@@ -1,0 +1,23 @@
+diff --git a/main.go b/main.go
+index 9bee5ea..a0ad0e7 100644
+--- a/main.go
++++ b/main.go
+@@ -2720,6 +2720,7 @@ type accountSnapshot struct {
+ 	FreeModels     int                           `json:"freeModels,omitempty"` // 旧版快照兼容字段；账号表不再显示，不参与调度
+ 	ModelCooldowns int                           `json:"modelCooldowns,omitempty"`
+ 	Checkin        checkinStatusSnapshot         `json:"checkin"`
++	Growth         *growthSnapshot               `json:"growth,omitempty"`
+ }
+ 
+ type modelStateSnapshot struct {
+@@ -2750,7 +2751,9 @@ func writeStatusSnapshot() error {
+ 	now := time.Now()
+ 	for _, acc := range accounts {
+ 		as := accountSnapshot{Path: acc.Path, Edition: acc.Profile().Key}
+-		as.Checkin = dailyCheckins.view(checkinTargetLocked(acc), now)
++		t := checkinTargetLocked(acc)
++		as.Checkin = dailyCheckins.view(t, now)
++		as.Growth = growthView(t.key)
+ 		as.QuotaTotal = acc.QuotaTotal
+ 		as.QuotaUsed = acc.QuotaUsed
+ 		as.QuotaRemaining = acc.QuotaRemaining

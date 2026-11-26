@@ -34,6 +34,8 @@ PERMISSIONS = {
     ("POST", "accounts/remove"): "accounts",
     ("POST", "session/cancel"): "accounts",
     ("POST", "labels"): "accounts",
+    ("POST", "reserve"): "accounts",
+    ("POST", "pins"): "accounts",
     ("POST", "checkin/manual"): "checkin",
     ("POST", "checkin/all"): "checkin",
     ("POST", "checkin"): "checkin",

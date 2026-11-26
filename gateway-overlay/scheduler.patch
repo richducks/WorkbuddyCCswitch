@@ -1,7 +1,8 @@
 diff --git a/checkin.go b/checkin.go
+index 64b19e8..01926cf 100644
 --- a/checkin.go
 +++ b/checkin.go
-@@ -26,12 +26,13 @@
+@@ -26,12 +26,13 @@ var checkinZone = time.FixedZone("UTC+8", 8*60*60)
  var dailyCheckins = newDailyCheckinScheduler(checkinStateFile)
  
  type checkinStatusSnapshot struct {
@@ -21,25 +22,26 @@ diff --git a/checkin.go b/checkin.go
  }
  
  // Only hashes and fixed status messages are saved; never save UID/token/nickname.
-@@ -314,9 +315,16 @@
- 			p.Status, p.Message, dirty = "missed", "今日剩余时间不足以保持一分钟间隔；不跨日补签", true
+@@ -277,11 +278,15 @@ func (s *dailyCheckinScheduler) planAndClaim(now time.Time, targets []checkinTar
+ 	var jobs []checkinJob
+ 	var eligible []checkinTarget
+ 	for _, target := range targets {
+-		if !target.eligible || s.active[target.key] {
++		if _, seen := s.active[target.key]; !target.eligible || seen {
+ 			continue
  		}
- 	}
-+	// Keep the date and plan state current even when automatic attempts are paused.
-+	if !automaticCheckinEnabled() {
-+		if dirty {
-+			s.saveLocked(newTraceID())
+-		s.active[target.key] = true
+-		eligible = append(eligible, target)
++		// Keep a daily record for manual check-in even when auto check-in is off.
++		autoEnabled := accountAutomaticCheckinEnabled(target)
++		s.active[target.key] = autoEnabled
++		if autoEnabled {
++			eligible = append(eligible, target)
 +		}
-+		return nil
-+	}
- 	if startup && !now.Before(start) {
- 		if s.queueStartupLocked(now, eligible, dayEnd) {
- 			dirty = true
- 		}
- 	}
- 	startupBusy := s.startupBusyLocked()
-@@ -390,6 +398,11 @@
- func (s *dailyCheckinScheduler) queueStartupLocked(now time.Time, targets []checkinTarget, dayEnd time.Time) bool {
+ 		p := s.doc.Plans[target.key]
+ 		if p == nil {
+ 			firstOffset, e1 := s.random(retry.Sub(start))
+@@ -391,6 +396,11 @@ func (s *dailyCheckinScheduler) queueStartupLocked(now time.Time, targets []chec
  	var pending []checkinTarget
  	for _, t := range targets {
  		p := s.doc.Plans[t.key]
@@ -50,15 +52,17 @@ diff --git a/checkin.go b/checkin.go
 +
  		if p.Status == "pending" && p.Attempts == 0 {
  			pending = append(pending, t)
-@@ -531,6 +544,7 @@
+ 		}
+@@ -531,6 +541,8 @@ func (s *dailyCheckinScheduler) runJob(ctx context.Context, job checkinJob) {
  }
  
  func backgroundDailyCheckin(ctx context.Context) {
 +	defer startManualCheckinServer(ctx, dailyCheckins)()
++	defer startGrowthMonitor(ctx)()
  	dailyCheckins.run(ctx)
  }
  
-@@ -582,6 +596,7 @@
+@@ -582,6 +594,7 @@ func (s *dailyCheckinScheduler) view(target checkinTarget, now time.Time) checki
  	if s.doc.Date == out.Date {
  		if p := s.doc.Plans[target.key]; p != nil {
  			out.Status, out.Attempts, out.LastAt, out.Message = p.Status, p.Attempts, p.LastAt/1000, p.Message

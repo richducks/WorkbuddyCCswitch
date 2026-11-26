@@ -102,6 +102,10 @@ class PermissionsTests(unittest.TestCase):
                                         headers={"X-CSRFToken": csrf})
             self.assertEqual(response.status_code, 403)
         self.controller.set_account_pool.assert_not_called()
+        response = self.client.post("/api/checkin/settings", json={"file": "workbuddy2.json", "enabled": False},
+                                    headers={"X-CSRFToken": csrf})
+        self.assertEqual(response.status_code, 403)
+        self.controller.set_account_auto_checkin.assert_not_called()
         with self.app.app_context():
             sm = self.app.appbuilder.sm
             role = sm.find_role("WorkBuddy Read Only")

@@ -23,11 +23,15 @@ BRIDGE_TOKEN = WEB_DATA / "bridge.token"
 
 def ensure_token(path: Path) -> str:
     try:
-        return private_read(path).strip()
-    except OSError:
+        token = private_read(path).strip()
+    except FileNotFoundError:
         token = secrets.token_urlsafe(36)
-        private_write(path, token + "\n")
-        return token
+        atomic(path, (token + "\n").encode("ascii"))
+    if not token:
+        raise ValueError(f"令牌文件为空：{path.name}")
+    if not token.isascii():
+        raise ValueError(f"令牌文件必须使用 ASCII 字符：{path.name}")
+    return token
 
 
 def trim_logs(root: Path, keep_bytes: int = 5 * 1024 * 1024) -> None:

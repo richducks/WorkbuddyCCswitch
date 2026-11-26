@@ -1,7 +1,7 @@
 package main
 
 // expire-first 调度策略（本地 overlay）：
-//   开启后，同优先级可用账号按「额度周期到期时间最早优先」选择，把快到期的积分先用掉；
+//   开启后，同优先级可用账号按仍有余额的积分批次最早到期时间选择；
 //   到期时间相同或未知的账号保持原轮询顺序兜底。未开启时与上游轮询行为完全一致。
 //
 // 开关只来自环境变量 WB_SCHEDULING_STRATEGY（expireFirst 开启，其余值关闭），
@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -30,47 +31,106 @@ func init() {
 	log.Printf("[调度策略] 到期日最短优先(expireFirst)=%t 来源=WB_SCHEDULING_STRATEGY 未启用时保持轮询", expireFirstScheduling.Load())
 }
 
-// earliestQuotaEnd 返回权益资源里最早的额度周期截止时间（积分到期时间）。
-// 单个资源的截止字段优先级与 activePlanResource 一致：DeductionEndTime > ExpiredTime > CycleEndTime；
-// 只统计状态有效（0 正常 / 3 积分用尽）、已到扣减起始时间且截止仍在未来的资源。
-// 赠送包等一切带截止时间的权益都参与：它们同样代表「到期即作废的积分」。
-// 没有截止时间的长期权益不参与；没有任何可用截止时间时返回零值（视为未知）。
-func earliestQuotaEnd(resources []planResource, now time.Time) time.Time {
-	var earliest time.Time
-	for _, r := range resources {
-		status, err := planInteger(r.Status)
-		if err != nil || (status != 0 && status != 3) {
-			continue
-		}
-		if start, present, err := planTimestamp(r.DeductionStartTime); err == nil && present && now.Before(start) {
-			continue
-		}
-		for _, raw := range []json.RawMessage{r.DeductionEndTime, r.ExpiredTime, r.CycleEndTime} {
-			end, present, err := planTimestamp(raw)
-			if err != nil {
-				break // 该资源时间字段异常，放弃这个资源，不影响其他资源
-			}
-			if !present {
-				continue
-			}
-			if end.After(now) && (earliest.IsZero() || end.Before(earliest)) {
-				earliest = end
-			}
-			break
-		}
-	}
-	return earliest
+type creditBatch struct {
+	Name      string  `json:"name"`
+	Total     float64 `json:"total"`
+	Used      float64 `json:"used"`
+	Remaining float64 `json:"remaining"`
+	ExpiresAt int64   `json:"expiresAt,omitempty"`
 }
 
-// setAccountQuotaExpiry 把额度到期时间写入账号状态；查询失败时不清理旧值，避免抖动。
-func setAccountQuotaExpiry(acc *Account, resources []planResource, now time.Time) {
-	end := earliestQuotaEnd(resources, now)
-	accountMu.Lock()
-	acc.QuotaExpireAt = end
-	accountMu.Unlock()
-	if !end.IsZero() {
-		log.Printf("[额度到期] 账号 %s 最早积分周期截止=%s 来源=完整权益查询", acc.Path, end.Format("2006-01-02 15:04:05"))
+type creditBatchObservation struct {
+	batches []creditBatch
+	at      time.Time
+}
+
+const sliceCreditCapacityType = 4
+
+type creditSlice struct {
+	Total     json.RawMessage `json:"SlicePeriodCapacitySizePrecise"`
+	Remaining json.RawMessage `json:"SlicePeriodCapacityRemainPrecise"`
+}
+
+func (o creditBatchObservation) current(now time.Time) []creditBatch {
+	// 正常每 5 分钟查询一次；停扫后不继续依赖旧的批次余额。
+	if o.at.IsZero() || now.Sub(o.at) > 10*time.Minute {
+		return nil
 	}
+	return o.batches
+}
+
+func creditAmount(raw json.RawMessage) (float64, bool) {
+	value := strings.TrimSpace(strings.Trim(string(raw), `"`))
+	if value == "" {
+		return 0, false
+	}
+	amount, err := parseQuotaCapacity(value)
+	return amount, err == nil && validRateCredit(amount)
+}
+
+func collectCreditBatches(resources []planResource, now time.Time) []creditBatch {
+	var batches []creditBatch
+	for _, r := range resources {
+		active, err := activePlanResource(r, now)
+		if err != nil || !active {
+			continue
+		}
+		// 官网的切片额度(4)使用当天 SlicePeriodUsageDetails，不是外层周期余额。
+		// 外层周期结束不能代表切片失效日期；未确认切片边界时不据此排序。
+		kind, _ := planInteger(r.CapacityType)
+		totalRaw, remainingRaw := r.CycleCapacitySizePrecise, r.CycleCapacityRemainPrecise
+		if kind == sliceCreditCapacityType {
+			var slices []creditSlice
+			if err := json.Unmarshal(r.SlicePeriodUsageDetails, &slices); err != nil || len(slices) != 1 {
+				continue
+			}
+			slice := slices[0]
+			totalRaw, remainingRaw = slice.Total, slice.Remaining
+		}
+		total, totalOK := creditAmount(totalRaw)
+		remaining, remainingOK := creditAmount(remainingRaw)
+		if !totalOK || !remainingOK || total <= 0 || remaining > total {
+			continue
+		}
+		status, _ := planInteger(r.Status)
+		if status == 3 {
+			remaining = 0
+		}
+		batch := creditBatch{Name: safePlanName(r.PackageName), Total: total, Used: total - remaining, Remaining: remaining}
+		if kind != sliceCreditCapacityType {
+			cycle, _, err := planTimestamp(r.CycleEndTime)
+			if err != nil {
+				continue
+			}
+			// 积分可能先于订阅失效；失效时间不能晚于权益本身的截止。
+			for _, raw := range []json.RawMessage{r.DeductionEndTime, r.ExpiredTime} {
+				if end, present, _ := planTimestamp(raw); present && (cycle.IsZero() || end.Before(cycle)) {
+					cycle = end
+				}
+			}
+			if !cycle.IsZero() {
+				if !cycle.After(now) {
+					continue
+				}
+				batch.ExpiresAt = cycle.Unix()
+			}
+		}
+		batches = append(batches, batch)
+	}
+	sort.SliceStable(batches, func(i, j int) bool {
+		a, b := batches[i].ExpiresAt, batches[j].ExpiresAt
+		return a > 0 && (b == 0 || a < b)
+	})
+	return batches
+}
+
+func earliestQuotaEnd(batches []creditBatch, now time.Time) time.Time {
+	for _, batch := range batches {
+		if batch.Remaining > 0 && batch.ExpiresAt > now.Unix() {
+			return time.Unix(batch.ExpiresAt, 0)
+		}
+	}
+	return time.Time{}
 }
 
 // expireFirstBetter 判断候选账号是否应取代当前最优：
