@@ -82,6 +82,6 @@ hermes config set --force providers.workbuddy '{
 | 现象 | 处理 |
 |---|---|
 | `verify` 报容器不 healthy | `docker compose logs` 看启动日志；确认 `.env` UID/GID 对 `data/` 有写权限 |
-| 网页 401 但密码正确 | 密码来自部署主机 `data/web/web.token`；隧道端口 ≠ 容器端口，别混用 |
+| 网页 401 但密码正确 | 控制台只有账号密码登录（初始 admin/123456，改过即新密码）；隧道端口 ≠ 容器端口，别混用 |
 | Hermes 连 8317 超时 | 隧道没起或服务器侧端口改过；先 `curl http://127.0.0.1:18317/v1/models -H "Authorization: Bearer <key>"` 分辨本地/服务器问题 |
 | clone 报权限 | 私库需要 GitHub 凭据：`gh auth status`、部署 token 或 SSH key |

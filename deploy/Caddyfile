@@ -1,0 +1,19 @@
+{$WB_API_SITE} {
+	@models {
+		method GET
+		path /v1/models
+	}
+	@chat {
+		method POST
+		path /v1/chat/completions
+	}
+	handle @models {
+		reverse_proxy workbuddy-hermes:8317
+	}
+	handle @chat {
+		reverse_proxy workbuddy-hermes:8317
+	}
+	handle {
+		respond 404
+	}
+}

@@ -23,15 +23,35 @@ func automaticCheckinEnabled() bool {
 	return os.IsNotExist(err)
 }
 
+// The old global setting remains the default for accounts without an override.
+func accountAutomaticCheckinEnabled(target checkinTarget) bool {
+	if target.account != nil && target.account.Path != "" {
+		path := target.account.Path + ".auto-checkin"
+		info, err := os.Lstat(path)
+		if !os.IsNotExist(err) {
+			if err != nil || !info.Mode().IsRegular() || info.Size() != int64(len("enabled\n")) {
+				return false
+			}
+			data, err := os.ReadFile(path)
+			return err == nil && string(data) == "enabled\n"
+		}
+	}
+	return automaticCheckinEnabled()
+}
+
 func manualCheckinReady(p *checkinRecord, target checkinTarget, now time.Time) bool {
 	start, _, _ := checkinWindows(now)
 	return target.eligible && p != nil && (p.Status == "pending" || p.Status == "missed") &&
-		p.Attempts == 0 && p.LastAt == 0 && (p.StartupAt == 0 || !automaticCheckinEnabled()) &&
-		now.Before(start.Add(16*time.Hour - 40*time.Second))
+		p.Attempts == 0 && p.LastAt == 0 && (p.StartupAt == 0 || !accountAutomaticCheckinEnabled(target)) &&
+		now.Before(start.Add(16*time.Hour-40*time.Second))
 }
 
 // Use the same lock, attempt journal and upstream worker as automatic check-in.
 func (s *dailyCheckinScheduler) claimManualCheckin(target checkinTarget) (checkinJob, int) {
+	return s.claimCheckin(target, "")
+}
+
+func (s *dailyCheckinScheduler) claimCheckin(target checkinTarget, observedDay string) (checkinJob, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loadLocked()
@@ -44,10 +64,18 @@ func (s *dailyCheckinScheduler) claimManualCheckin(target checkinTarget) (checki
 	if s.doc.Date != date || !manualCheckinReady(p, target, now) {
 		return checkinJob{}, http.StatusConflict
 	}
+	automatic := observedDay != ""
+	if automatic && (observedDay != date || !accountAutomaticCheckinEnabled(target) ||
+		(p.Status == "pending" && p.FirstAt > now.UnixMilli())) {
+		return checkinJob{}, http.StatusConflict
+	}
 	trace := newTraceID()
 	p.Attempts, p.Status, p.LastAt = 1, "running", now.UnixMilli()
 	p.StartupAt = 0
 	p.Message = "正在手动签到"
+	if automatic {
+		p.Message = "正在自动补领"
+	}
 	if !s.saveLocked(trace) {
 		return checkinJob{}, http.StatusServiceUnavailable
 	}

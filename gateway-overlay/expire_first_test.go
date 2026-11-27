@@ -3,7 +3,10 @@ package main
 // expire-first 调度策略单元测试（本地 overlay）。
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
@@ -39,7 +42,11 @@ func TestEarliestQuotaEndPrefersEarliestActiveDeadline(t *testing.T) {
 		// 长期权益：无截止时间，不参与
 		{Status: jsonInt(0), DeductionStartTime: jsonInt(1760000000)},
 	}
-	end := earliestQuotaEnd(resources, now)
+	for i := range resources {
+		resources[i].CycleCapacitySizePrecise = jsonInt(100)
+		resources[i].CycleCapacityRemainPrecise = jsonInt(100)
+	}
+	end := earliestQuotaEnd(collectCreditBatches(resources, now), now)
 	if end.IsZero() || !end.Equal(time.Date(2026, 12, 1, 0, 0, 0, 0, cnTZ())) {
 		t.Fatalf("应取最早的 2026-12-01，得到 %v", end)
 	}
@@ -53,7 +60,11 @@ func TestEarliestQuotaEndIgnoresInvalidAndFutureResources(t *testing.T) {
 		{Status: jsonInt(0), DeductionStartTime: jsonStr("2026-12-01 00:00:00"), ExpiredTime: jsonStr("2026-11-25 00:00:00")}, // 未到扣减起始，忽略
 		{Status: jsonInt(0), DeductionStartTime: jsonInt(1760000000), CycleEndTime: jsonStr("2026-12-10 08:00:00")},           // 有效兜底字段
 	}
-	end := earliestQuotaEnd(resources, now)
+	for i := range resources {
+		resources[i].CycleCapacitySizePrecise = jsonInt(100)
+		resources[i].CycleCapacityRemainPrecise = jsonInt(100)
+	}
+	end := earliestQuotaEnd(collectCreditBatches(resources, now), now)
 	if end.IsZero() || end.Day() != 10 {
 		t.Fatalf("应取 2026-12-10 08:00，得到 %v", end)
 	}
@@ -64,8 +75,49 @@ func TestEarliestQuotaEndNoDeadlineReturnsZero(t *testing.T) {
 	if end := earliestQuotaEnd(nil, now); !end.IsZero() {
 		t.Fatalf("空资源应返回零值，得到 %v", end)
 	}
-	if end := earliestQuotaEnd([]planResource{{Status: jsonInt(0)}}, now); !end.IsZero() {
+	resources := []planResource{{Status: jsonInt(0), CycleCapacitySizePrecise: jsonInt(100), CycleCapacityRemainPrecise: jsonInt(100)}}
+	if end := earliestQuotaEnd(collectCreditBatches(resources, now), now); !end.IsZero() {
 		t.Fatalf("无截止时间资源应返回零值，得到 %v", end)
+	}
+}
+
+func TestEarliestQuotaEndSkipsDepletedBatchesAndUsesCreditCycle(t *testing.T) {
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	var resources []planResource
+	err := json.Unmarshal([]byte(`[
+	  {"Status":3,"CycleCapacitySizePrecise":"200","CycleCapacityRemainPrecise":"0","CycleEndTime":"2026-11-22 00:00:00"},
+	  {"Status":0,"CycleEndTime":"2026-11-23 00:00:00"},
+	  {"Status":0,"CycleCapacitySizePrecise":100,"CycleCapacityRemainPrecise":12.5,"CycleEndTime":"2026-12-01 00:00:00","DeductionEndTime":"2027-11-21 00:00:00"}
+	]`), &resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 12, 1, 0, 0, 0, 0, cnTZ())
+	batches := collectCreditBatches(resources, now)
+	if len(batches) != 2 || batches[0].Remaining != 0 || batches[1].Used != 87.5 || batches[1].Remaining != 12.5 {
+		t.Fatalf("应保留已确认的批次用量，跳过缺少余额的批次: %+v", batches)
+	}
+	if end := earliestQuotaEnd(batches, now); !end.Equal(want) {
+		t.Fatalf("仅按有余额批次的积分周期截止排序: got %v, want %v", end, want)
+	}
+}
+
+func TestEarliestQuotaEndDoesNotUseOuterDatesForSliceCredits(t *testing.T) {
+	now := time.Now()
+	var resource planResource
+	err := json.Unmarshal([]byte(`{
+	  "Status":0,"CapacityType":4,"CycleCapacitySizePrecise":"1000","CycleCapacityRemainPrecise":"800",
+	  "SlicePeriodUsageDetails":[{"SlicePeriodCapacitySizePrecise":"50","SlicePeriodCapacityRemainPrecise":"7"}]
+	}`), &resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches := collectCreditBatches([]planResource{resource}, now)
+	if len(batches) != 1 || batches[0].Remaining != 7 || batches[0].Used != 43 {
+		t.Fatalf("应展示当日切片而不是外层额度: %+v", batches)
+	}
+	if end := earliestQuotaEnd(batches, now); !end.IsZero() {
+		t.Fatalf("未确认切片截止，不能用于到期排序: %v", end)
 	}
 }
 
@@ -97,8 +149,10 @@ func TestExpireFirstBetter(t *testing.T) {
 
 func TestNextAccountExpireFirstPicksEarliestDeadline(t *testing.T) {
 	withExpireFirst(t, true)
-	early := &Account{Path: "workbuddy.json", QuotaExpireAt: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)}
-	late := &Account{Path: "workbuddy2.json", QuotaExpireAt: time.Date(2026, 12, 21, 0, 0, 0, 0, time.UTC)}
+	now := time.Now()
+	early := testBatchAccount("workbuddy.json", now, now.Add(time.Hour))
+	late := testBatchAccount("workbuddy2.json", now, now.Add(2*time.Hour))
+	late.CreditBatches.batches = append([]creditBatch{{Total: 100, Used: 100, ExpiresAt: now.Add(time.Minute).Unix()}}, late.CreditBatches.batches...)
 	// 故意把晚到期的账号放在游标位置，证明排序不受轮询游标影响。
 	withTestPool(t, []*Account{late, early}, 0)
 	for i := 0; i < 3; i++ {
@@ -123,9 +177,10 @@ func TestNextAccountExpireFirstPicksEarliestDeadline(t *testing.T) {
 
 func TestNextAccountExpireFirstTieKeepsRoundRobin(t *testing.T) {
 	withExpireFirst(t, true)
-	same := time.Date(2026, 12, 21, 0, 0, 0, 0, time.UTC)
-	a := &Account{Path: "a.json", QuotaExpireAt: same}
-	b := &Account{Path: "b.json", QuotaExpireAt: same}
+	now := time.Now()
+	same := now.Add(time.Hour)
+	a := testBatchAccount("a.json", now, same)
+	b := testBatchAccount("b.json", now, same)
 	withTestPool(t, []*Account{a, b}, 0)
 	first, _, err := nextAccountForModel("auto", nil)
 	if err != nil || first != a {
@@ -139,8 +194,9 @@ func TestNextAccountExpireFirstTieKeepsRoundRobin(t *testing.T) {
 
 func TestNextAccountRoundRobinWhenDisabled(t *testing.T) {
 	withExpireFirst(t, false)
-	early := &Account{Path: "a.json", QuotaExpireAt: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)}
-	late := &Account{Path: "b.json", QuotaExpireAt: time.Date(2026, 12, 21, 0, 0, 0, 0, time.UTC)}
+	now := time.Now()
+	early := testBatchAccount("a.json", now, now.Add(time.Hour))
+	late := testBatchAccount("b.json", now, now.Add(2*time.Hour))
 	withTestPool(t, []*Account{early, late}, 0)
 	first, _, err := nextAccountForModel("auto", nil)
 	if err != nil || first != early {
@@ -154,18 +210,73 @@ func TestNextAccountRoundRobinWhenDisabled(t *testing.T) {
 
 func TestNextAccountUnknownExpiryRankedLast(t *testing.T) {
 	withExpireFirst(t, true)
-	known := &Account{Path: "a.json", QuotaExpireAt: time.Date(2026, 12, 21, 0, 0, 0, 0, time.UTC)}
-	unknown := &Account{Path: "b.json"}
+	now := time.Now()
+	known := testBatchAccount("a.json", now, now.Add(time.Hour))
+	unknown := testBatchAccount("b.json", now.Add(-time.Hour), now.Add(time.Minute))
 	withTestPool(t, []*Account{unknown, known}, 0)
 	acc, _, err := nextAccountForModel("auto", nil)
 	if err != nil || acc != known {
 		t.Fatalf("已知到期时间应优先于未知: acc=%v err=%v", acc, err)
 	}
 	// 均未知时回退轮询。
-	known.QuotaExpireAt = time.Time{}
+	known.CreditBatches.batches[0].ExpiresAt = now.Add(-time.Minute).Unix()
 	acc, _, err = nextAccountForModel("auto", nil)
 	if err != nil || acc != unknown {
 		t.Fatalf("均未知应保持轮询选 b.json: acc=%v err=%v", acc, err)
+	}
+}
+
+func testBatchAccount(path string, observed, expiry time.Time) *Account {
+	return &Account{Path: path, CreditBatches: creditBatchObservation{
+		at: observed, batches: []creditBatch{{Total: 100, Remaining: 100, ExpiresAt: expiry.Unix()}},
+	}}
+}
+
+func TestExpireFirstQuotaRefreshDropsUnconfirmedBatches(t *testing.T) {
+	oldClient := cfg.HttpClient
+	t.Cleanup(func() { cfg.HttpClient = oldClient })
+	mode := "ok"
+	expiry := time.Now().Add(time.Hour).Unix()
+	cfg.HttpClient = &http.Client{Transport: retryTransportFunc(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		switch r.URL.Path {
+		case "/billing/meter/get-user-resource-summary":
+			if mode == "summary failure" {
+				w.WriteHeader(http.StatusBadGateway)
+			} else {
+				_, _ = w.WriteString(`{"code":0,"data":{"Packages":[{"CycleTotalCapacity":"100","CycleUsedCapacity":"1","CycleRemainCapacity":"99"}]}}`)
+			}
+		case "/billing/meter/get-user-resource":
+			if mode == "detail failure" {
+				w.WriteHeader(http.StatusBadGateway)
+			} else {
+				rows := []planResource{{Status: jsonInt(0), CycleEndTime: jsonInt(expiry),
+					CycleCapacitySizePrecise: jsonInt(100), CycleCapacityRemainPrecise: jsonInt(99)}}
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"Response": map[string]any{
+					"Data": map[string]any{"TotalCount": len(rows), "Accounts": rows},
+				}}})
+			}
+		default:
+			t.Fatalf("意外请求: %s", r.URL.Path)
+		}
+		return w.Result(), nil
+	})}
+	acc := &Account{Path: "fixture.json", Auth: &StoredAuth{Edition: "intl", Auth: StoredTokens{AccessToken: "fixture"}}}
+	ctx := context.Background()
+	for _, failure := range []string{"detail failure", "summary failure"} {
+		mode = "ok"
+		if err := refreshAccountQuota(ctx, acc); err != nil {
+			t.Fatal(err)
+		}
+		before := acc.CreditBatches.current(time.Now())
+		if len(before) != 1 || before[0].ExpiresAt != expiry || before[0].Remaining != 99 {
+			t.Fatalf("批次未从实际刷新路径进入账号状态: %+v", before)
+		}
+		mode = failure
+		err := refreshAccountQuota(ctx, acc)
+		if (err != nil) != (failure == "summary failure") || acc.QuotaRemaining != 99 || len(acc.CreditBatches.current(time.Now())) != 0 {
+			t.Fatalf("%s 后应保留总余额但不再使用旧批次: err=%v balance=%v", failure, err, acc.QuotaRemaining)
+		}
 	}
 }
 

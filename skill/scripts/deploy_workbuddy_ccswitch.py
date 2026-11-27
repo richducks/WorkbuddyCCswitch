@@ -469,9 +469,8 @@ def cmd_deploy(args) -> None:
     print(compose(repo_dir, "ps", "--format", "{{.Name}} {{.Status}}").strip())
     web_host, web_port = ports[8080]
     print(f"管理网页：http://{web_host}:{web_port}/"
-          "（用户名 admin，密码在容器内 /data/web/web.token）")
-    print("下一步：docker compose exec workbuddy-hermes cat /data/web/web.token 查看网页密码；"
-          "再按 README 或 skill/references/remote-hermes.md 配置 Hermes 对接")
+          "（初始账号 admin，初始密码 123456，仅限 BIND_IP=127.0.0.1；局域网部署先改密或预置 permissions-bootstrap）")
+    print("下一步：登录后尽快修改初始密码；再按 README 或 skill/references/remote-hermes.md 配置 Hermes 对接")
 
 
 class ProbeValidationError(ValueError):

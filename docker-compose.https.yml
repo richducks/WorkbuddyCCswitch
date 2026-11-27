@@ -1,0 +1,18 @@
+# Opt-in public HTTPS entry point for Docker Compose.
+services:
+  workbuddy-https:
+    image: caddy:2.11
+    restart: unless-stopped
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+    environment:
+      WB_API_SITE: "${WB_API_DOMAIN:?Set WB_API_DOMAIN to the public DNS hostname}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - workbuddy-caddy-data:/data
+      - workbuddy-caddy-config:/config
+
+volumes:
+  workbuddy-caddy-data:
+  workbuddy-caddy-config:

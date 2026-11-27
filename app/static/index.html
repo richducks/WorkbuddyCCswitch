@@ -25,7 +25,7 @@
           font-size: 12px; color: var(--muted); background: var(--panel); }
   .pill.live { color: var(--ok); border-color: rgba(63,185,80,.4); }
   .pill.off { color: var(--bad); border-color: rgba(248,81,73,.4); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 18px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
   .card.wide { grid-column: 1 / -1; }
   .card h2 { margin: 0 0 14px; font-size: 15px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
@@ -43,6 +43,10 @@
   button.primary { background: rgba(88,166,255,.12); border-color: var(--accent); color: var(--accent); font-weight: 600; }
   button.danger:hover { border-color: var(--bad); color: var(--bad); }
   button.sm { padding: 4px 9px; font-size: 12px; }
+  .reserveInput { width: 80px; padding: 2px 6px; font: inherit; font-size: 12px; color: var(--fg);
+                  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
+  .reserveInput:focus { outline: none; border-color: var(--accent); }
+  .reserveInput:disabled { opacity: .45; }
   .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
   .spacer { flex: 1; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -50,6 +54,20 @@
   th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
        border-bottom: 1px solid var(--border); padding: 8px 10px; white-space: nowrap; }
   td { border-bottom: 1px solid var(--border); padding: 11px 10px; vertical-align: middle; }
+  #acctCard td, #checkinOnlyCard td { vertical-align: top; }
+  #acctCard { --account-title-height: 46px; }
+  #acctCard > h2 { position: sticky; top: 0; z-index: 3; background: var(--panel);
+                   min-height: var(--account-title-height); line-height: 24px; padding: 8px 0 14px; margin: -8px 0 0; }
+  .account-actions { display: flex; flex-direction: column; gap: 6px; width: max-content; max-width: 100%; }
+  .account-auto-checkin { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 28px; }
+  .acctNameCell { overflow-wrap: anywhere; }
+  button.account-name { max-width: 100%; padding: 0; border: 0; background: transparent;
+                        font-size: inherit; text-align: left; overflow-wrap: anywhere; }
+  button.account-name:hover { text-decoration: underline; }
+  button.pinBtn { width: 32px; min-height: 28px; padding: 0; color: var(--muted); }
+  button.pinBtn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+  .pinBtn svg { display: block; margin: auto; }
+  .renameInput { width: 150px; max-width: 100%; }
   tr:last-child td { border-bottom: 0; }
   .file { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); }
   .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600;
@@ -60,9 +78,22 @@
   .badge.mute { color: var(--muted); background: rgba(139,148,158,.10); }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .quota { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .credit-details { margin-top: 4px; color: var(--muted); font-size: 12px; }
+  .credit-details summary { cursor: pointer; }
+  .credit-details ul { padding-inline-start: 16px; margin: 6px 0 0; }
+  .credit-details li + li { margin-top: 5px; }
+  .credit-details strong { color: var(--fg); font-weight: 500; overflow-wrap: anywhere; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; max-width: 70ch; }
+  .modalOverlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex;
+                  align-items: center; justify-content: center; z-index: 60; }
+  .modalBox { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+              padding: 16px 18px; width: min(460px, calc(100vw - 48px)); display: grid; gap: 12px; }
+  .modalMsg { font-size: 14px; line-height: 1.6; }
+  .modalBtns { display: flex; gap: 8px; justify-content: flex-end; }
+  .modalCopy { width: 100%; background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+               border-radius: 8px; padding: 8px; font: inherit; resize: vertical; }
   #modelIds { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  #modelIds code { white-space: nowrap; }
+  #modelIds code { overflow-wrap: anywhere; }
   .provider-row a { color: var(--accent); text-decoration: none; }
   .provider-row a:hover { text-decoration: underline; }
   .toast { position: fixed; right: 20px; bottom: 20px; max-width: 420px; z-index: 50;
@@ -81,6 +112,7 @@
   .json-fold { margin-top: 12px; }
   .json-fold summary { cursor: pointer; color: var(--muted); font-size: 12.5px; user-select: none; }
   .json-fold summary:hover { color: var(--fg); }
+  .json-fold a { color: var(--accent); }
   .json-fold pre { margin-top: 10px; max-height: 320px; overflow: auto; }
   .empty { color: var(--muted); text-align: center; padding: 22px; }
   .loading { opacity: .5; pointer-events: none; }
@@ -101,6 +133,11 @@
   .sidenav a.active { color: var(--accent); background: rgba(88,166,255,.12); font-weight: 600; }
   .main { flex: 1; min-width: 0; }
   section.card { scroll-margin-top: 16px; }
+  .setup-guide { line-height: 1.65; }
+  .setup-guide h3 { margin: 22px 0 6px; font-size: 14px; }
+  .setup-guide p, .setup-guide ul { margin: 8px 0; }
+  .setup-guide :is(ul, ol) { padding-left: 24px; }
+  .setup-guide pre { overflow-x: auto; }
   @media (max-width: 920px) {
     .layout { flex-direction: column; }
     .sidenav { position: static; flex: none; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px; }
@@ -109,19 +146,44 @@
     .sidenav a { flex: 0 0 auto; border: 1px solid var(--border); background: var(--panel-2); }
     .sidenav a.active { border-color: var(--accent); }
   }
+  @media (min-width: 641px) {
+    /* An overflow container would trap the sticky table headings inside the table. */
+    #acctCard .account-table { overflow: visible; }
+    #acctCard thead { position: sticky; top: var(--account-title-height); z-index: 2; background: var(--panel);
+                     box-shadow: inset 0 -1px var(--border); }
+    #acctCard :is(th, td) { padding-inline: 6px; }
+    #acctCard td { overflow-wrap: anywhere; }
+    #acctCard .quota { white-space: normal; }
+  }
   @media (max-width: 640px), (pointer: coarse) {
     body { font-size: 15px; }
+    button, .sidenav a, .reserveInput { min-height: 44px; }
     button { padding: 10px 14px; }
-    button.sm { padding: 8px 12px; font-size: 12.5px; }
+    button.sm { padding: 8px 12px; font-size: 13px; }
+    .account-auto-checkin, button.pinBtn { min-width: 44px; min-height: 44px; }
+    .sidenav a { display: flex; align-items: center; }
     .wrap { padding: 20px 14px 48px; }
     .toast { left: 14px; right: 14px; max-width: none; }
+  }
+  @media (max-width: 640px) {
+    .sidenav, .main { width: 100%; }
+    .card { min-width: 0; padding-inline: 14px; }
+    .account-table :is(table, tbody) { display: block; }
+    .account-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .account-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                              gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+    .account-table tbody tr:last-child { border: 0; }
+    .account-table tbody td { min-width: 0; padding: 0; border: 0; }
+    .account-table :is(.acctActionsCell, td.empty) { grid-column: 1 / -1; }
+    .account-table td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 12px; }
+    .account-table .quota { white-space: normal; }
   }
 </style>
 </head>
 <body>
 <div class="wrap layout">
   <nav class="sidenav" id="sidenav" aria-label="模块导航">
-    <!-- 顺序按「日常打开控制台先看什么」排：账号池 → 模型目录 → Hermes 对接 → 用量桥；首个导航项即默认标签页 -->
+    <!-- 首个导航项是默认标签页。 -->
     <div class="nav-group">
       <div class="nav-title">账号与签到</div>
       <a href="#acctCard">微信账号池</a>
@@ -137,6 +199,7 @@
     <div class="nav-group">
       <div class="nav-title">用量与状态</div>
       <a href="#bridgeCard">用量桥 / CC Switch</a>
+      <a href="#setupGuideCard">配置说明</a>
     </div>
   </nav>
   <div class="main">
@@ -153,6 +216,7 @@
       <a class="pill" id="logoutLink" href="/logout/" hidden>退出</a>
     </div>
   </header>
+  <p class="hint" id="loadError" role="status" hidden>无法读取控制台状态。请稍后重试。</p>
 
   <div class="grid">
     <section class="card wide" id="providersCard" hidden>
@@ -175,12 +239,12 @@
     </section>
     <section class="card wide" id="acctCard">
       <h2>WorkBuddy 微信账号池 <span class="n" id="acctCount"></span></h2>
-      <div class="table-wrap">
+      <div class="table-wrap account-table">
       <table>
         <thead><tr>
-          <th>账号</th><th>来源 / 状态</th><th>额度（积分）</th><th>今日签到</th><th>操作</th>
+          <th>账号</th><th>来源 / 状态</th><th>额度（积分）</th><th>保留积分</th><th>今日签到</th><th>自动签到</th><th>置顶</th><th>操作</th>
         </tr></thead>
-        <tbody id="acctBody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+        <tbody id="acctBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
       </table>
       </div>
       <div class="bar">
@@ -189,21 +253,29 @@
         <span class="spacer"></span>
         <button id="refreshBtn">刷新状态</button>
       </div>
-      <div class="bar">
-        <label><input type="checkbox" id="autoCheckinEnabled" disabled> 自动签到</label>
-        <span class="file" id="autoCheckinState" aria-live="polite"></span>
-      </div>
-      <div class="hint">北京时间：自动签到在 08:00–09:30 随机发起，失败在 09:30–10:00 按计划重试。具体计划和实际尝试时间见每个账号。关闭自动签到不影响手动操作。</div>
+      <div class="hint">按账号勾选自动签到。北京时间 08:00–09:30 随机签到，失败在 09:30–10:00 重试。取消勾选不影响手动签到。</div>
+      <details class="json-fold hint">
+        <summary>积分获取与使用</summary>
+        <p>同等条件下，置顶账号优先；未置顶账号优先使用有余额且更早到期的积分批次所在账号。剩余积分低于保留值时会跳过该账号，填 0 则不保留。实际扣减批次由 WorkBuddy 决定。</p>
+        <p>「今日签到」显示签到奖励状态。开启自动签到后，错过计划且官方确认未领取时会自动补领。</p>
+        <p>其他积分请用同一账号在 WorkBuddy 头像菜单打开「Buddy 加油站」「去邀约」或「成长计划」。任务奖励以官方页面标注的积分为准，能量不是可用积分。</p>
+        <p>
+          <a href="https://www.workbuddy.cn/events/follow-guide/" target="_blank" rel="noopener noreferrer">官方公众号奖励</a>
+          · <a href="https://www.workbuddy.cn/profile/credits-usage" target="_blank" rel="noopener noreferrer">官方逐笔消耗明细</a>
+          · <a href="https://www.workbuddy.cn/profile/plans-usage" target="_blank" rel="noopener noreferrer">官方套餐与用量</a>
+        </p>
+        <p>官方到账后，网关会在下一轮额度查询时更新该账号余额，无需手工录入。此页「刷新状态」只读取已有快照，不会领取积分。</p>
+      </details>
       <div class="hint" id="batchCheckinResults" aria-live="polite" style="white-space:pre-wrap" hidden></div>
     </section>
 
     <section class="card wide" id="checkinOnlyCard" hidden>
       <h2>代签到 <span class="n" id="checkinOnlyCount"></span></h2>
-      <div class="hint">这些账号仅参加自动签到。移入微信账号池后，模型调用可以消耗其积分。</div>
-      <div class="table-wrap">
+      <div class="hint">勾选后仅参加自动签到。移入微信账号池后，模型调用可以消耗其积分。</div>
+      <div class="table-wrap account-table">
         <table>
-          <thead><tr><th>账号</th><th>来源 / 状态</th><th>额度（积分）</th><th>今日签到</th><th>操作</th></tr></thead>
-          <tbody id="checkinOnlyBody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+          <thead><tr><th>账号</th><th>来源 / 状态</th><th>额度（积分）</th><th>今日签到</th><th>自动签到</th><th>操作</th></tr></thead>
+          <tbody id="checkinOnlyBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
       <div class="bar">
@@ -211,7 +283,6 @@
         <span class="spacer"></span>
         <button id="refreshCheckinOnlyBtn">刷新状态</button>
       </div>
-      <div class="hint" id="checkinOnlyAutoState" aria-live="polite"></div>
     </section>
 
     <section class="card" id="hermesCard">
@@ -269,6 +340,66 @@
         用量刷新只读，不会触发签到。
       </div>
     </section>
+    <section class="card wide setup-guide" id="setupGuideCard" hidden>
+      <h2>服务端与客户端配置说明</h2>
+      <p>一台电脑运行 WorkBuddy 服务端，保存微信账号并执行签到。其他电脑在 Hermes 或兼容 OpenAI Chat Completions 的客户端里填写 API 地址和网关 API Key，即可使用服务端模型。</p>
+
+      <h3>准备服务端</h3>
+      <p>可使用装有 Docker Compose 的 Linux、macOS 或 Windows 电脑。Windows 和 macOS 用 Docker Desktop 运行 Linux 容器。服务器需要保持开机并联网，休眠期间无法处理模型请求或签到。</p>
+      <p>首次部署先安装 Git、Python 3.9+ 和 Go 1.26+，然后克隆项目并构建与服务器架构对应的网关。</p>
+      <pre><code>git clone https://github.com/richducks/WorkbuddyCCswitch.git
+cd WorkbuddyCCswitch
+cp .env.example .env
+python3 scripts/build_gateway.py
+docker compose up -d --build
+docker compose ps</code></pre>
+      <p>在 Windows PowerShell 中用 <code>Copy-Item .env.example .env</code> 和 <code>python scripts/build_gateway.py</code>。已有 <code>.env</code> 时直接编辑现有文件。换服务器时，停掉旧实例后私下迁移 <code>data/gateway/</code> 和 <code>data/web/</code>，并跳过日志和 Unix 套接字；同一批微信账号只在一套实例中运行。</p>
+
+      <h3>配置域名和路由器</h3>
+      <ol>
+        <li>选一个子域名，例如 <code>api.example.com</code>。在域名服务商处添加 A 记录，指向服务器或路由器的公网 IPv4。公网 IPv4 会变化时，配置路由器的 DDNS 自动更新解析。只有能从外网访问 IPv6 时才添加 AAAA 记录。</li>
+        <li>在路由器上为服务端电脑预留固定的局域网 IP，然后添加两条 TCP 端口转发。公网 <code>80 → 服务器局域网 IP:80</code> 和公网 <code>443 → 服务器局域网 IP:443</code>。公网 IP 直接分配给服务器时，在服务器防火墙或云安全组允许 TCP 80、443。</li>
+        <li>如果路由器的 WAN 地址处于运营商 CGNAT，需先取得可入站的公网 IPv4，或采用可达的 IPv6 或隧道方案。DNS 解析成功本身无法打通入站访问。</li>
+      </ol>
+
+      <h3>启用 HTTPS 模型入口</h3>
+      <p>在服务器项目目录编辑 <code>.env</code>，保留本机绑定，把示例域名换成你的真实域名。域名字段只填主机名。</p>
+      <pre><code>BIND_IP=127.0.0.1
+WB_API_DOMAIN=api.example.com</code></pre>
+      <p>启动前确认模型网关启用了 API Key。以默认网关端口请求 <code>http://127.0.0.1:8317/v1/models</code>，省略 Key 时应返回 <code>401</code>。然后启动代理，Caddy 会为域名申请并续期 HTTPS 证书。</p>
+      <pre><code>docker compose -f docker-compose.yml -f docker-compose.https.yml up -d workbuddy-hermes workbuddy-https
+docker compose -f docker-compose.yml -f docker-compose.https.yml logs --tail=80 workbuddy-https</code></pre>
+      <p>如果 80 或 443 已被反向代理占用，复用现有代理，并只转发 <code>GET /v1/models</code> 和 <code>POST /v1/chat/completions</code> 到模型网关。</p>
+
+      <h3>在另一台电脑配置客户端</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>字段</th><th>填写内容</th></tr></thead>
+          <tbody>
+            <tr><td>协议</td><td>OpenAI Chat Completions</td></tr>
+            <tr><td>Base URL</td><td><code>https://api.example.com/v1</code>，换成你的域名</td></tr>
+            <tr><td>API Key</td><td>在服务端控制台「Hermes 对接」点击「复制完整 Key」。持有此 Key 可以消耗微信账号池积分。</td></tr>
+            <tr><td>模型 ID</td><td>从「模型目录」复制一个实际可用的模型 ID。使用 CC Switch 时，将上述值填入对应客户端的提供商配置。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>通过 SSH 使用管理网页和用量查询</h3>
+      <p>先在服务器启用 SSH 密钥登录，并确保客户端能连到服务器的 SSH 端口。如果要从公网使用 SSH，单独放通或转发该端口。管理网页默认宿主机端口为 <code>8080</code>，下面以服务端使用 <code>18080</code> 为例。核对服务端的 <code>HOST_WEB_PORT</code> 和 <code>HOST_BRIDGE_PORT</code>，相应修改每个转发项最后的端口。</p>
+      <pre><code>ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:18080 -L 127.0.0.1:8318:127.0.0.1:8318 SSH用户@服务器域名</code></pre>
+      <p>保持 SSH 窗口打开。浏览器访问 <code>http://127.0.0.1:18080/</code>，用控制台账号密码登录。CC Switch 用量查询填写 Base URL <code>http://127.0.0.1:8318</code>、请求 <code>GET /usage</code>、提取器 <code>response.entries</code>，凭据使用服务端私有文件 <code>data/web/bridge.token</code> 中的 Token。若模型 API 也要走 SSH，在同一命令里加入 <code>-L 127.0.0.1:8317:127.0.0.1:8317</code>，客户端改填 <code>http://127.0.0.1:8317/v1</code>。</p>
+
+      <h3>从外网验收</h3>
+      <p>用手机热点或其他外网测试，避免路由器的 NAT 回环影响结果。</p>
+      <pre><code>nslookup api.example.com
+curl -i https://api.example.com/v1/models
+curl -i https://api.example.com/api/summary</code></pre>
+      <ul>
+        <li>域名解析应指向当前公网地址。模型列表省略 Key 时返回 <code>401</code>，用客户端填入正确 Key 后应能读取模型列表。</li>
+        <li>管理路径返回 <code>404</code>。端口 <code>8317</code>、<code>8318</code> 和管理端口保持本机绑定。</li>
+        <li>如果连接超时，检查端口转发、服务器防火墙和公网地址。证书签发失败时，检查 DNS、80/443 的入站连通性和 Caddy 日志。出现 <code>502</code> 时，检查 <code>docker compose ps</code> 中网关是否运行。</li>
+      </ul>
+    </section>
   </div>
   </div>
 </div>
@@ -295,7 +426,7 @@ let pollTimer = null;
 let loginGeneration = 0;
 let loginRequest = null;
 let checkinBusy = false;
-let autoSettingsBusy = false;
+const autoSettingsBusy = new Set();
 let loadFailed = false;
 
 function toast(msg, err=false) {
@@ -306,8 +437,8 @@ function toast(msg, err=false) {
 }
 async function api(path, opts={}) {
   const r = await fetch(path, opts);
-  if (r.status === 401 && document.querySelector('meta[name="wb-csrf"]').content) {
-    location.assign('/login/?next=/');
+  if (r.status === 401) {
+    location.assign(document.querySelector('meta[name="wb-csrf"]').content ? '/login/?next=/' : '/login');
   }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || (`HTTP ${r.status}`));
@@ -353,43 +484,91 @@ function badge(status, label) {
   return `<span class="badge ${cls}"><span class="dot"></span>${esc(label)}</span>`;
 }
 
-function renderAccounts(accounts, id, autoCheckinEnabled) {
+function renderAccounts(accounts, id, autoDefault, canChangeAuto, canManageAccounts) {
   $(`#${id}Count`).textContent = `共 ${accounts.length} 个`;
   const body = $(`#${id}Body`);
   if (!accounts.length) {
     const action = id === 'acct' ? '添加微信账号' : '添加代签到账号';
-    body.innerHTML = `<tr><td colspan="5" class="empty">尚无账号，点击「${action}」扫码接入。${id === 'checkinOnly' ? '也可从「微信账号池」移入。' : ''}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="${id === 'acct' ? 8 : 6}" class="empty">尚无账号，点击「${action}」扫码接入。${id === 'checkinOnly' ? '也可从「微信账号池」移入。' : ''}</td></tr>`;
     return;
   }
+  if (id === 'acct') accounts = [...accounts].sort((a, b) => (a.pinRank || Infinity) - (b.pinRank || Infinity));
+  const expandedCredits = new Set(Array.from(body.querySelectorAll('.credit-details[open]'), d => d.dataset.file));
   body.innerHTML = accounts.map((a) => {
     const q = a.quota;
+    const file = esc(a.file);
+    const batches = Array.isArray(q?.batches) ? q.batches : [];
+    const details = batches.length ? `<details class="credit-details" data-file="${file}" ${expandedCredits.has(a.file) ? 'open' : ''}>
+      <summary>积分批次（${batches.length}）</summary>
+      <ul>${batches.map(b => {
+        const exp = fmtExpire(b.expiresAt);
+        return `<li><strong>${esc(b.name || '积分批次')}</strong>
+          <div>已用 ${fmtQuota(b.used)} / ${fmtQuota(b.total)} · 剩余 ${fmtQuota(b.remaining)}</div>
+          <div${exp?.cls ? ` style="color:var(--${exp.cls})"` : ''}>${exp ? `到期：${exp.text}` : '未确认到期时间'}</div>
+        </li>`;
+      }).join('')}</ul>
+    </details>` : '<div class="credit-details">暂无批次明细</div>';
     const quota = q && q.known
-      ? `<span class="quota">${fmtQuota(q.remaining)} / ${fmtQuota(q.total)}</span>`
+      ? `<span class="quota">${fmtQuota(q.remaining)} / ${fmtQuota(q.total)}</span>${details}`
       : '<span class="empty" style="padding:0">—</span>';
-    const exp = q ? fmtExpire(q.expireAt) : null;
+    const reserve = q && q.reserve != null ? q.reserve : 100;
+    const reserveCell = a.checkinOnly ? '' : `<td data-label="保留积分">${q
+      ? `<input type="number" min="0" step="any" class="reserveInput" aria-label="${esc(a.label)}的保留积分" data-file="${esc(a.file)}" data-prev="${reserve}" value="${reserve}" title="低于该保留额度的账号不再承接调度；0 表示不保留，默认 100">`
+      : '—'}</td>`;
     const source = `${esc(a.edition || '未加载')} · ${esc(a.state || (a.loaded ? '?' : '未加载'))}`;
     const c = a.checkin;
     const extra = c.attempts ? ` · ${esc(c.attempts)} 次` : '';
     const chk = badge(c.status, c.label + extra);
+    const g = a.growth;
+    let growthLine = '';
+    if (g && g.active) {
+      const streak = g.streakDays ? ` · 连签 ${g.streakDays} 天` : '';
+      if (g.checkedIn) {
+        growthLine = `<div class="file" style="margin-top:3px">成长值：已领${g.todayCredit ? ` ${fmtQuota(g.todayCredit)} 积分` : ''}${streak}</div>`;
+      } else if (g.todayCredit) {
+        growthLine = `<div class="file" style="margin-top:3px">成长值：<span style="color:var(--accent)">待领 ${fmtQuota(g.todayCredit)} 积分</span>${streak}${g.isStreakDay ? ' · 宝箱日' : ''}</div>`;
+      }
+    }
     const label = esc(a.label);
+    const autoEnabled = a.autoCheckinEnabled ?? autoDefault;
+    const pinned = a.pinRank >= 1;
+    const name = canManageAccounts
+      ? `<button type="button" class="account-name renameBtn" data-file="${file}" title="点击修改名称">${label}</button>`
+      : `<div>${label}</div>`;
+    const pinCell = a.checkinOnly ? '' : `<td data-label="置顶">
+      <button type="button" class="pinBtn" data-file="${file}" aria-label="${label}的置顶" aria-pressed="${pinned}"
+        title="${pinned ? '取消置顶，恢复常规消耗顺序' : '置顶后优先消耗该账号积分'}" ${canManageAccounts ? '' : 'disabled'}>
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="${pinned ? 'currentColor' : 'none'}"
+          stroke="currentColor" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round">
+          <path d="M8 3h8l-1 7 3 3v2H6v-2l3-3z M12 15v6"/>
+        </svg>
+      </button>
+    </td>`;
     return `<tr>
-      <td><div>${label}</div><div class="file">${esc(a.file)}</div></td>
+      <td class="acctNameCell">${name}<div class="file">${file}</div></td>
       <td><div>${source}</div><div class="file">${a.loaded ? '已加载' : '文件存在，待热加载'}</div></td>
-      <td>${quota}${exp ? `<div class="file" style="margin-top:3px;${exp.cls ? `color:var(--${exp.cls})` : ''}">积分到期：${exp.text}</div>` : ''}</td>
-      <td>${chk}
-        ${autoCheckinEnabled && c.nextAt ? `<div class="file" style="margin-top:3px">计划${c.status === 'failed' ? '重试' : '签到'}：${fmtTime(c.nextAt)}</div>` : ''}
+      <td data-label="额度（积分）">${quota}</td>
+      ${reserveCell}
+      <td data-label="今日签到">${chk}${growthLine}
+        ${autoEnabled && c.nextAt ? `<div class="file" style="margin-top:3px">计划${c.status === 'failed' ? '重试' : '签到'}：${fmtTime(c.nextAt)}</div>` : ''}
         ${c.lastAt ? `<div class="file" style="margin-top:3px">${c.status === 'success' ? '签到时间' : '最近尝试'}：${fmtTime(c.lastAt)}</div>` : ''}
       </td>
-      <td style="white-space:nowrap">
+      <td data-label="自动签到">
+        <label class="account-auto-checkin"><input type="checkbox" class="autoCheckinInput" aria-label="${label}的自动签到"
+          data-file="${file}" ${autoEnabled ? 'checked' : ''} ${!canChangeAuto || autoSettingsBusy.has(a.file) ? 'disabled' : ''}></label>
+      </td>
+      ${pinCell}
+      <td class="acctActionsCell"><div class="account-actions">
         ${a.checkinOnly ? '' : `<button class="sm manualCheckinBtn" data-file="${esc(a.file)}" ${a.manualEligible && !checkinBusy?'':'disabled'} title="${a.manualEligible?'立即签到，无需重启网关':'当前状态不可手动签到'}">${c.status === 'missed' ? '补签' : '手动签到'}</button>`}
         <button class="sm moveAccountBtn" data-file="${esc(a.file)}" data-label="${label}" data-checkin-only="${!a.checkinOnly}">${a.checkinOnly ? '移入微信账号池' : '移入代签到'}</button>
-        <button class="sm renameBtn" data-file="${esc(a.file)}" data-label="${label}">改名</button>
         <button class="sm danger removeBtn" data-file="${esc(a.file)}">移除</button>
-      </td></tr>`;
+      </div></td></tr>`;
   }).join('');
 }
 
 function render(d) {
+  if (document.activeElement?.matches('.reserveInput, .renameEditor *')
+      || $('.renameEditor[aria-busy="true"]')) return; // 编辑或保存期间不替换控件
   summary = d;
   const permissions = d.permissions;
   $('#permissionsLink').hidden = !permissions?.admin;
@@ -402,11 +581,10 @@ function render(d) {
   gp.textContent = d.gatewayAlive ? '网关运行中' : '网关未运行';
   gp.className = 'pill ' + (d.gatewayAlive ? 'live' : 'off');
   $('#verPill').textContent = d.version;
-  renderAccounts(d.accounts.filter(a => !a.checkinOnly), 'acct', d.autoCheckinEnabled);
-  renderAccounts(d.accounts.filter(a => a.checkinOnly), 'checkinOnly', d.autoCheckinEnabled);
-  $('#checkinOnlyAutoState').textContent = d.autoCheckinEnabled
-    ? '自动签到已开启，使用微信账号池的签到计划。'
-    : '自动签到已关闭，可在微信账号池中开启。';
+  const canChangeAuto = permissions?.checkin_settings !== false;
+  const canManageAccounts = permissions?.accounts !== false;
+  renderAccounts(d.accounts.filter(a => !a.checkinOnly), 'acct', d.autoCheckinEnabled, canChangeAuto, canManageAccounts);
+  renderAccounts(d.accounts.filter(a => a.checkinOnly), 'checkinOnly', d.autoCheckinEnabled, canChangeAuto, canManageAccounts);
 
   const h = d.hermes;
   $('#hEndpoint').textContent = h.endpoint;
@@ -422,22 +600,96 @@ function render(d) {
     ? models.map(m => `<code>${esc(m.id)}</code>`).join(' ')
     : '—';
 
-  document.querySelectorAll('.moveAccountBtn, .renameBtn, .removeBtn').forEach(b => {
+  document.querySelectorAll('.moveAccountBtn, .removeBtn').forEach(b => {
     b.hidden = permissions?.accounts === false;
   });
   document.querySelectorAll('.manualCheckinBtn').forEach(b => {
     b.hidden = permissions?.checkin === false;
     b.onclick = () => doManualCheckin(b.dataset.file);
   });
+  document.querySelectorAll('.pinBtn').forEach(b => b.onclick = () => {
+    const wasPinned = b.getAttribute('aria-pressed') === 'true';
+    post('/api/pins', {file: b.dataset.file, pinned: !wasPinned}).then(() => {
+      toast(wasPinned ? '已取消置顶，恢复常规消耗顺序' : '已置顶，优先消耗该账号积分');
+      load();
+    }).catch(e => toast(e.message, true));
+  });
   document.querySelectorAll('.renameBtn').forEach(b => b.onclick = () => {
-    const next = prompt('新的显示名称（仅本地备注，不含账号标识）：', b.dataset.label);
-    if (next && next.trim()) post('/api/labels', {file:b.dataset.file, label:next.trim()}).then(load).catch(e=>toast(e.message,true));
+    const original = b.textContent;
+    const box = document.createElement('div');
+    box.className = 'file renameEditor';
+    const input = document.createElement('input');
+    input.className = 'renameInput';
+    input.maxLength = 32;
+    input.value = original;
+    input.setAttribute('aria-label', '账号显示名称');
+    input.title = '新的显示名称（仅本地备注，不含账号标识）';
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'sm'; saveBtn.textContent = '保存';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'sm'; cancelBtn.textContent = '取消';
+    box.append(input, saveBtn, cancelBtn);
+    b.hidden = true;
+    b.after(box);
+    input.focus();
+    input.select();
+    const finish = () => {
+      box.remove();
+      b.hidden = false;
+      b.focus();
+    };
+    cancelBtn.onclick = finish;
+    const submit = async () => {
+      if (box.getAttribute('aria-busy') === 'true') return;
+      const next = input.value.trim();
+      if (!next || next === original) { finish(); return; }
+      box.setAttribute('aria-busy', 'true');
+      input.readOnly = true;
+      saveBtn.disabled = cancelBtn.disabled = true;
+      try {
+        await post('/api/labels', {file: b.dataset.file, label: next});
+        b.textContent = next;
+        finish();
+        toast('已更新名称');
+        load();
+      } catch (e) {
+        box.removeAttribute('aria-busy');
+        input.readOnly = false;
+        saveBtn.disabled = cancelBtn.disabled = false;
+        input.focus();
+        toast(e.message, true);
+      }
+    };
+    saveBtn.onclick = submit;
+    input.onkeydown = (ev) => {
+      if (ev.isComposing) return;
+      if (ev.key === 'Enter') submit();
+      else if (ev.key === 'Escape' && !cancelBtn.disabled) finish();
+    };
+  });
+  document.querySelectorAll('.reserveInput').forEach(b => {
+    b.disabled = permissions?.accounts === false;
+    b.onchange = () => {
+      const prev = b.dataset.prev;
+      const v = Number(b.value);
+      if (b.value.trim() === '' || !isFinite(v) || v < 0) {
+        b.value = prev;
+        toast('保留额度必须是非负数字', true);
+        return;
+      }
+      if (String(v) === prev) return;
+      post('/api/reserve', {file:b.dataset.file, reserve:v}).then(()=>{
+        b.dataset.prev = String(v);
+        toast(v > 0 ? '已更新保留额度' : '已取消保留额度');
+        load();
+      }).catch(e=>{ b.value = prev; toast(e.message, true); });
+    };
   });
   document.querySelectorAll('.moveAccountBtn').forEach(b => b.onclick = async () => {
     const checkinOnly = b.dataset.checkinOnly === 'true';
     const target = checkinOnly ? '代签到' : '微信账号池';
     const effect = checkinOnly ? '该账号将仅参与自动签到，已发送的模型请求可能仍会消耗积分。' : '模型调用将可以消耗该账号的积分。';
-    if (!confirm(`将「${b.dataset.label}」移入${target}？${effect}`)) return;
+    if (!(await uiConfirm(`将「${b.dataset.label}」移入${target}？${effect}`))) return;
     b.disabled = true;
     try {
       await post('/api/accounts/move', {file:b.dataset.file, checkinOnly});
@@ -449,23 +701,23 @@ function render(d) {
       toast(e.message, true);
     }
   });
-  document.querySelectorAll('.removeBtn').forEach(b => b.onclick = () => {
-    if (!confirm(`确认将 ${b.dataset.file} 移出账号池？凭据会移到私有 .disabled 目录，不会删除。`)) return;
+  document.querySelectorAll('.removeBtn').forEach(b => b.onclick = async () => {
+    if (!(await uiConfirm(`确认将 ${b.dataset.file} 移出账号池？凭据会移到私有 .disabled 目录，不会删除。`))) return;
     post('/api/accounts/remove', {file:b.dataset.file}).then(()=>{toast('已移出账号池，等待热加载');load();}).catch(e=>toast(e.message,true));
   });
   const signable = d.accounts.filter(a => a.manualEligible).length;
   $('#checkinAllBtn').disabled = checkinBusy || !signable;
   $('#checkinAllBtn').textContent = checkinBusy ? '签到中…' : `一键签到${signable ? `（${signable}）` : ''}`;
-  $('#autoCheckinEnabled').checked = d.autoCheckinEnabled === true;
-  $('#autoCheckinEnabled').disabled = autoSettingsBusy || permissions?.checkin_settings === false;
-  $('#autoCheckinState').textContent = autoSettingsBusy ? '保存中…' : (d.autoCheckinEnabled ? '已开启' : '已关闭');
+  document.querySelectorAll('.autoCheckinInput').forEach(input => input.onchange = () => saveAutoCheckin(input));
 }
 
 async function load(manual = false) {
   try {
     render(await api('/api/summary'));
+    $('#loadError').hidden = true;
     if (loadFailed) { toast('连接已恢复'); loadFailed = false; }
   } catch (e) {
+    $('#loadError').hidden = false;
     if (!loadFailed) {
       loadFailed = true;
       const gp = $('#gwPill');
@@ -494,16 +746,26 @@ async function doBatchCheckin() {
   finally { checkinBusy = false; await load(); }
 }
 
-async function saveAutoCheckin(enabled) {
-  if (autoSettingsBusy || !summary) return;
-  autoSettingsBusy = true;
-  render(summary);
+async function saveAutoCheckin(input) {
+  const {file} = input.dataset;
+  const enabled = input.checked;
+  if (autoSettingsBusy.has(file)) return;
+  autoSettingsBusy.add(file);
+  input.disabled = true;
   try {
-    const saved = await post('/api/checkin/settings', {enabled});
-    summary.autoCheckinEnabled = saved.enabled;
-    toast(saved.enabled ? '已开启自动签到' : '已关闭自动签到，手动签到仍可用');
-  } catch (e) { toast('保存失败：' + e.message, true); }
-  finally { autoSettingsBusy = false; render(summary); await load(); }
+    const saved = await post('/api/checkin/settings', {file, enabled});
+    const account = summary?.accounts.find(a => a.file === file);
+    if (account) account.autoCheckinEnabled = saved.enabled;
+    toast(saved.enabled ? '已开启该账号的自动签到' : '已关闭该账号的自动签到');
+  } catch (e) {
+    input.checked = !enabled;
+    toast('保存失败：' + e.message, true);
+  } finally {
+    autoSettingsBusy.delete(file);
+    input.disabled = false;
+    render(summary);
+    await load();
+  }
 }
 
 async function doManualCheckin(file) {
@@ -536,7 +798,66 @@ async function copy(text, tip) {
     if (document.execCommand('copy')) { toast(tip); return; }
   } catch { /* The browser may disable clipboard access on LAN HTTP. */ }
   finally { field.remove(); oldFocus?.focus(); }
-  window.prompt('浏览器未允许自动复制，请手动复制：', text);
+  uiCopyFallback(text);
+}
+
+// 页面内确认对话框：嵌入式浏览器会静默压制原生 confirm()/prompt()，改用 DOM 弹窗。
+function uiConfirm(message) {
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.className = 'modalOverlay';
+    const box = document.createElement('div');
+    box.className = 'modalBox';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    const msg = document.createElement('div');
+    msg.className = 'modalMsg';
+    msg.textContent = message;
+    const btns = document.createElement('div');
+    btns.className = 'modalBtns';
+    const ok = document.createElement('button');
+    ok.className = 'sm'; ok.textContent = '确定';
+    const cancel = document.createElement('button');
+    cancel.className = 'sm'; cancel.textContent = '取消';
+    btns.append(ok, cancel);
+    box.append(msg, btns);
+    ov.appendChild(box);
+    const close = (v) => { ov.remove(); resolve(v); };
+    ok.onclick = () => close(true);
+    cancel.onclick = () => close(false);
+    ov.onclick = (ev) => { if (ev.target === ov) close(false); };
+    document.body.appendChild(ov);
+    ok.focus();
+  });
+}
+
+// 复制兜底：用只读文本域展示内容供手动复制，替代被压制的原生 prompt()。
+function uiCopyFallback(text) {
+  const ov = document.createElement('div');
+  ov.className = 'modalOverlay';
+  const box = document.createElement('div');
+  box.className = 'modalBox';
+  const msg = document.createElement('div');
+  msg.className = 'modalMsg';
+  msg.textContent = '浏览器未允许自动复制，请手动复制以下内容：';
+  const field = document.createElement('textarea');
+  field.className = 'modalCopy';
+  field.readOnly = true;
+  field.rows = Math.min(10, Math.ceil(text.length / 60) + 1);
+  field.value = text;
+  const btns = document.createElement('div');
+  btns.className = 'modalBtns';
+  const ok = document.createElement('button');
+  ok.className = 'sm'; ok.textContent = '关闭';
+  btns.appendChild(ok);
+  box.append(msg, field, btns);
+  ov.appendChild(box);
+  const close = () => ov.remove();
+  ok.onclick = close;
+  ov.onclick = (ev) => { if (ev.target === ov) close(); };
+  document.body.appendChild(ov);
+  field.focus();
+  field.select();
 }
 
 function setLoginTitle(checkinOnly) {
@@ -633,7 +954,6 @@ $('#addBtn').onclick = () => openLogin(false);
 $('#addCheckinOnlyBtn').onclick = () => openLogin(true);
 $('#refreshCheckinOnlyBtn').onclick = () => load(true);
 $('#checkinAllBtn').onclick = doBatchCheckin;
-$('#autoCheckinEnabled').onchange = e => saveAutoCheckin(e.target.checked);
 $('#copyProviderBtn').onclick = () => copy(JSON.stringify(summary?.hermes.providerEntry, null, 2), 'provider JSON 已复制');
 $('#copyCmdBtn').onclick = () => copy(summary?.hermes.configCommand, '配置命令已复制');
 $('#copyKeyBtn').onclick = async () => { try { await copy((await api('/api/hermes/key')).apiKey, '完整 Key 已复制'); } catch(e){toast(e.message,true);} };
@@ -645,7 +965,11 @@ const navSections = navLinks.map(a => document.querySelector(a.getAttribute('hre
 function activateTab(link) {
   const target = document.querySelector(link.getAttribute('href'));
   if (!target) return;
-  navLinks.forEach(x => x.classList.toggle('active', x === link));
+  navLinks.forEach(x => {
+    x.classList.toggle('active', x === link);
+    if (x === link) x.setAttribute('aria-current', 'page');
+    else x.removeAttribute('aria-current');
+  });
   navSections.forEach(s => { s.hidden = s !== target; });
 }
 navLinks.forEach(a => a.addEventListener('click', e => { e.preventDefault(); activateTab(a); }));

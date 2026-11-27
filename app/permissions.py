@@ -4,10 +4,12 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, redirect, render_template_string, request, url_for
+from flask import Flask, abort, jsonify, redirect, render_template_string, request, session, url_for
 from flask_appbuilder import AppBuilder, IndexView, expose
 from flask_appbuilder.const import AUTH_DB
 from flask_appbuilder.models.sqla.base import SQLA
+from flask_appbuilder.security.sqla.manager import SecurityManager
+from flask_appbuilder.security.views import UserDBModelView as FABUserDBModelView
 from flask_login import current_user
 from flask_wtf import CSRFProtect
 from flask_wtf.csrf import generate_csrf
@@ -20,6 +22,20 @@ from controller import Controller, private_read, private_write
 STATIC = Path(__file__).resolve().parent / "static"
 VIEW = "WorkBuddy"
 READ_ONLY = "WorkBuddy Read Only"
+# 开箱即用的默认初始密码：仅限本机绑定（127.0.0.1）使用，局域网绑定会被启动检查拒绝。
+DEFAULT_INITIAL_PASSWORD = "123456"
+# 默认密码未修改时注入控制台顶部的提示条（可关闭，按浏览器会话记忆）。
+INITIAL_PASSWORD_BANNER = (
+    '<div id="wb-initial-banner" role="status" style="background:#b45309;color:#fff;'
+    'padding:8px 16px;font:13px/1.6 system-ui,sans-serif;display:flex;gap:12px;align-items:center;">'
+    '<span>当前使用默认密码 123456，<a href="/initial-password" style="color:#fff;'
+    'text-decoration:underline;">请尽快修改</a>；未修改前无法绑定局域网地址。</span>'
+    '<button type="button" aria-label="关闭提示" onclick="sessionStorage.setItem(\'wbInitialBanner\',\'1\');'
+    'this.parentElement.remove()" style="margin-left:auto;background:none;border:none;color:#fff;'
+    'cursor:pointer;font-size:16px;padding:0 4px;">×</button></div>'
+    '<script>try{if(sessionStorage.getItem("wbInitialBanner"))'
+    '{document.getElementById("wb-initial-banner").remove();}}catch(e){}</script>'
+)
 PERMISSIONS = {
     ("GET", "summary"): "status",
     ("GET", "session"): "accounts",
@@ -34,11 +50,24 @@ PERMISSIONS = {
     ("POST", "accounts/remove"): "accounts",
     ("POST", "session/cancel"): "accounts",
     ("POST", "labels"): "accounts",
+    ("POST", "reserve"): "accounts",
+    ("POST", "pins"): "accounts",
     ("POST", "checkin/manual"): "checkin",
     ("POST", "checkin/all"): "checkin",
     ("POST", "checkin"): "checkin",
     ("POST", "checkin/settings"): "checkin_settings",
 }
+
+
+class UserDBModelView(FABUserDBModelView):
+    formatters_columns = {
+        **(FABUserDBModelView.formatters_columns or {}),
+        "active": lambda value: "是" if value else "否",
+    }
+
+
+class ConsoleSecurityManager(SecurityManager):
+    userdbmodelview = UserDBModelView
 
 
 class SecurityIndex(IndexView):
@@ -76,21 +105,30 @@ def _initialize(appbuilder: AppBuilder, db: SQLA, password: str | None, bind_ip:
     pending_id = session.execute(text("SELECT user_id FROM wb_initial_admin LIMIT 1")).scalar()
     if pending_id is not None:
         pending_user = sm.get_user_by_id(pending_id) if pending_id else None
-        if bind_ip != "127.0.0.1" and pending_user and check_password_hash(pending_user.password, "123456"):
+        # 局域网绑定拒绝仍在使用默认密码的安装，倒逼先在本机改密。
+        if bind_ip != "127.0.0.1" and pending_user and check_password_hash(pending_user.password, DEFAULT_INITIAL_PASSWORD):
             raise RuntimeError("请先在本机修改初始密码，再启用局域网访问")
         return
     # A persistent installation marker also covers installations whose first
     # administrator was renamed or deleted after initialization.
     admin = sm.find_user(username="admin")
     if admin is None:
-        if not password or (bind_ip != "127.0.0.1" and len(password) < 12):
-            raise RuntimeError("请在私有数据目录配置控制台初始密码，局域网部署至少使用 12 个字符")
+        # 未提供 bootstrap 密码时回退到默认密码，让本机部署开箱可用；
+        # 局域网部署仍要求在 data/web/permissions-bootstrap 写入至少 12 个字符。
+        password = (password or "").strip() or DEFAULT_INITIAL_PASSWORD
+        if bind_ip != "127.0.0.1" and len(password) < 12:
+            raise RuntimeError(
+                "请在私有数据目录 data/web/permissions-bootstrap 配置至少 12 个字符的初始密码"
+                "（本机部署默认使用 admin/123456，无需配置）"
+            )
         admin = sm.user_model(username="admin", first_name="WorkBuddy", last_name="Admin",
                               email="admin@example.invalid", active=True, roles=[admin_role],
                               password=generate_password_hash(password))
         session.add(admin)
         session.flush()
-    session.execute(text("INSERT INTO wb_initial_admin (user_id) VALUES (:id)"), {"id": admin.id})
+    # 仅当实际生效的密码是默认值时才挂出"待改密"标记；自定义 bootstrap 密码不需要提醒。
+    if password == DEFAULT_INITIAL_PASSWORD:
+        session.execute(text("INSERT INTO wb_initial_admin (user_id) VALUES (:id)"), {"id": admin.id})
     session.commit()
 
 
@@ -101,6 +139,9 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
         SQLALCHEMY_DATABASE_URI="sqlite:///" + str(web_data / "permissions.sqlite3"),
         AUTH_TYPE=AUTH_DB,
         APP_NAME="WorkBuddy 权限管理",
+        BABEL_DEFAULT_LOCALE="zh",
+        BABEL_TRANSLATION_DIRECTORIES="translations",
+        LANGUAGES={"zh": {"flag": "cn", "name": "简体中文"}},
         AUTH_USER_REGISTRATION=False,
         AUTH_RATE_LIMITED=True,
         AUTH_RATE_LIMIT="10 per minute",
@@ -110,10 +151,15 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
         LOGOUT_REDIRECT_URL="/login/",
         MAX_CONTENT_LENGTH=1_000_000,
     )
+    @app.before_request
+    def use_chinese_locale():
+        if session.get("locale") != "zh":
+            session["locale"] = "zh"
+
     db = SQLA(app)
     CSRFProtect(app)
     with app.app_context():
-        builder = AppBuilder(app, db.session, indexview=SecurityIndex)
+        builder = AppBuilder(app, db.session, indexview=SecurityIndex, security_manager_class=ConsoleSecurityManager)
         _initialize(builder, db, bootstrap_password, bind_ip)
         builder.add_link("返回控制台", href="/")
 
@@ -123,19 +169,13 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
             and builder.sm.has_access("can_" + action, VIEW)
         )
 
-    @app.before_request
-    def require_initial_change():
+    def initial_password_pending() -> bool:
+        """默认密码尚未修改的标记：控制台提示条与 /api/summary 能力位都依赖它。"""
         if not current_user.is_authenticated or not current_user.is_active:
-            return
-        if request.endpoint in {"initial_password", "AuthDBView.logout", "appbuilder.static", "health"}:
-            return
-        pending = db.session.execute(text(
+            return False
+        return bool(db.session.execute(text(
             "SELECT 1 FROM wb_initial_admin WHERE user_id = :id"
-        ), {"id": current_user.id}).scalar()
-        if pending:
-            if request.path.startswith("/api/"):
-                return jsonify(error="请先修改初始密码"), 403
-            return redirect(url_for("initial_password"))
+        ), {"id": current_user.id}).scalar())
 
     @app.route("/initial-password", methods=["GET", "POST"])
     def initial_password():
@@ -147,8 +187,8 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
             new = request.form.get("new_password", "")
             if len(old) > 256 or not check_password_hash(current_user.password, old):
                 message = "当前密码错误"
-            elif not 6 <= len(new) <= 256 or new in (old, "123456"):
-                message = "请设置 6 至 256 字符的新密码"
+            elif not 6 <= len(new) <= 256 or new in (old, DEFAULT_INITIAL_PASSWORD):
+                message = "请设置 6 至 256 字符的新密码，且不能与当前或默认密码相同"
             else:
                 current_user.password = generate_password_hash(new)
                 db.session.execute(text("UPDATE wb_initial_admin SET user_id = 0 WHERE user_id = :id"),
@@ -164,7 +204,7 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
 <p><label>当前密码 <input name="current_password" type="password" autocomplete="current-password" required></label></p>
 <p><label>新密码 <input name="new_password" type="password" autocomplete="new-password" minlength="6" maxlength="256" required></label></p>
 <button type="submit">保存密码</button>
-</form><p><a href="{{ url_for('AuthDBView.logout') }}">退出</a></p>
+</form><p><a href="{{ url_for('AuthDBView.logout') }}">退出</a> · <a href="/">返回控制台</a></p>
 </main></body></html>
 """, message=message)
 
@@ -184,7 +224,10 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
         if not allowed("status"):
             abort(403)
         page = (STATIC / "index.html").read_text(encoding="utf-8")
-        return page.replace('name="wb-csrf" content=""', f'name="wb-csrf" content="{generate_csrf()}"', 1)
+        page = page.replace('name="wb-csrf" content=""', f'name="wb-csrf" content="{generate_csrf()}"', 1)
+        if initial_password_pending():
+            page = page.replace("<body>", "<body>" + INITIAL_PASSWORD_BANNER, 1)
+        return page
 
     @app.get("/providers.js")
     def provider_script():
@@ -218,6 +261,7 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
             result = dict(result)
             capabilities = {name: allowed(name) for name in set(PERMISSIONS.values())}
             capabilities["admin"] = builder.sm.has_access("can_list", "UserDBModelView")
+            capabilities["initialPassword"] = initial_password_pending()
             result["permissions"] = capabilities
             if not capabilities["accounts"]:
                 result["sessions"] = []

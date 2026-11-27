@@ -46,16 +46,30 @@ docker compose ps
 
 `scripts/backup-current.sh` 与 `scripts/rollback.sh` 是 bash 脚本（备份、回滚 systemd 旧方案），仅 Linux/macOS 可直接运行，Windows 用户请在 WSL2 中执行或手动复制 `data/`。
 
-默认管理网页为 `http://127.0.0.1:8080/`，用户名 `admin`。首次启动生成的网页登录密码保存在私有文件 `data/web/web.token`；网关 API Key 和 CC Switch 用量 token 是另外两份凭据。
+默认管理网页为 `http://127.0.0.1:8080/`，默认使用账号密码登录：初始账号 `admin`，初始密码 `123456`（仅限 `BIND_IP=127.0.0.1` 本机访问）。登录后请尽快修改密码；修改前控制台顶部会显示默认密码提示条。网关 API Key 和 CC Switch 用量 token 是另外两份凭据（供 API 客户端调用，与网页登录无关）。
 
-启用角色权限时，在 `.env` 设置 `WB_CONSOLE_PERMISSIONS=1`，首次启动前将初始密码写入权限为 `0600` 的 `data/web/permissions-bootstrap`。用 `admin` 登录后按照页面提示更换为至少 6 位的新密码，数据库初始化完成后可移除初始密码文件。权限管理入口在控制台右上角，权限模式优先于本机免令牌配置。
+账号密码登录是唯一的管理网页登录方式。局域网部署（`BIND_IP` 指向私有 IPv4）必须先在本机修改初始密码，或在首次启动前将至少 12 个字符的初始密码写入权限为 `0600` 的 `data/web/permissions-bootstrap`（该文件也可用于覆盖默认的 `123456`）；数据库初始化完成后可移除该文件。权限管理入口在控制台右上角。
+
+### 与现有实例并行验收
+
+在单独的目录解包或检出候选版本，不要复制现有 `.env` 或 `data/`。从 `.env.example` 创建 `.env` 并设置未占用端口、独立容器名和镜像名，例如：
+
+```dotenv
+WB_CONTAINER_NAME=workbuddy-acceptance
+WB_IMAGE=workbuddy-hermes-stack:acceptance
+HOST_WEB_PORT=28080
+HOST_GW_PORT=28317
+HOST_BRIDGE_PORT=28318
+```
+
+没有 `bin/workbuddy-gateway-manual` 时先构建网关；之后运行 `docker compose -p workbuddy-acceptance up -d --build`，访问 `http://127.0.0.1:28080/`。验收后在该目录执行 `docker compose -p workbuddy-acceptance down` 停止测试实例，数据保留在该目录的 `data/`，不会影响原实例。不在两套实例中使用同一批微信账号。
 
 
 **可信局域网直接访问（可选，优先用 SSH 隧道）**：在 `.env` 中将 `BIND_IP` 改为 Docker 宿主机的具体私有 IPv4 地址，再运行 `docker compose up -d --build`。不支持 `0.0.0.0` 或公网地址。三个端口按配置发布到同一个地址：
 
 | 服务 | 访问地址（示例使用默认端口） | 凭据 |
 |---|---|---|
-| 管理网页 | `http://<BIND_IP>:8080/`（`HOST_WEB_PORT`） | 用户名 `admin`，密码在 `data/web/web.token` |
+| 管理网页 | `http://<BIND_IP>:8080/`（`HOST_WEB_PORT`） | 用户名 `admin` 账号密码登录；局域网部署前先修改初始密码 |
 | Hermes 模型网关 | `http://<BIND_IP>:8317/v1`（`HOST_GW_PORT`） | 网页「复制完整 Key」，或 `data/gateway/config.json` 的 `gateway.apiKey` |
 | CC Switch 用量查询 | Base URL `http://<BIND_IP>:8318`（`HOST_BRIDGE_PORT`），查询 `GET /usage` | `data/web/bridge.token` |
 
@@ -71,6 +85,25 @@ ssh -NT -o ExitOnForwardFailure=yes \
 ```
 
 隧道连通后，在本地浏览器打开 `http://127.0.0.1:18080/`，使用控制台给出的 WorkBuddy 配置在本地 Hermes 接入 `http://127.0.0.1:8317/v1`。如有端口冲突，调整相应的本地转发端口及 Hermes 的 Base URL。不需要将 Docker 的业务端口开放到公网。
+
+## 公网域名访问模型 API（可选）
+
+控制台侧栏的「配置说明」包含服务端、路由器、客户端和 SSH 的逐步配置。
+
+服务器可以是运行 Docker Compose 和 Linux 容器的 Linux、Windows 或 macOS 电脑。Caddy 通过 Compose 内部网络访问模型网关。保留 `BIND_IP=127.0.0.1`，管理网页和用量桥继续通过 SSH 使用。
+
+1. 在 DNS 服务商处为 API 子域名添加 A 记录，指向服务器公网 IPv4。只在 IPv6 确实可达时添加 AAAA 记录。
+2. 公网 IP 在路由器上时，将 TCP 80 和 443 转发到 Docker 宿主机的局域网 IP。可以在路由器预留该电脑的 DHCP 地址。公网 IP 会变化时，用路由器的 DDNS 更新域名解析。公网 IP 在服务器上时，在安全组或防火墙放通 TCP 80 和 443。如果宿主机已有反向代理占用这两个端口，复用现有反向代理并将允许的模型路径转发到宿主机的网关端口，避免启动第二个监听同端口的代理。
+3. 在项目的 `.env` 中加入 `WB_API_DOMAIN=api.example.com`，替换成实际域名。确认网关启用了 API Key，且不带 Key 请求本机 `/v1/models` 返回 `401`。
+4. 启动 HTTPS 入口，Caddy 会申请和续期证书。
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.https.yml up -d workbuddy-hermes workbuddy-https
+   ```
+
+客户端用 `https://api.example.com/v1` 作为 OpenAI Chat Completions 的 Base URL，填写现有网关 API Key 和模型 ID。公网入口仅提供 `GET /v1/models` 和 `POST /v1/chat/completions`。
+
+从外网核对 `https://api.example.com/v1/models` 无 Key 返回 `401`，带 Key 返回模型列表，同时 `https://api.example.com/api/summary` 返回 `404`。网关 API Key 可消耗账号池积分，只发给有权使用模型的人。
 
 ## 打包 Skill（可选）
 
@@ -90,7 +123,7 @@ ssh -NT -o ExitOnForwardFailure=yes \
 | 微信账号池 | 逐号显示凭据文件名、可自定义备注、加载状态、额度、积分到期时间（≤3 天高亮）、今日签到徽章（已签到 / 未签到 / 签到失败 / 待签到）、最近签到时间 |
 | 添加微信账号 | 点击后容器执行 `login -auth workbuddyN.json`，网页实时显示终端二维码和备用登录链接；本人用目标微信号扫码授权，凭据写入独立文件，网关热加载自动加入账号池 |
 | 一键签到 / 单号签到 | 处理尚未尝试的待签或漏签国内个人账号；批量逐个执行并显示各账号结果。跳过已签到、已尝试或正在签到的账号；无需重启网关。 |
-| 自动签到 | 网页开关默认开启，保存后立即生效并在容器重启后保留。关闭只暂停尚未开始的自动尝试，不影响手动签到。每个账号显示当天的计划签到或重试时间，以及最近实际尝试时间（北京时间）。 |
+| 自动签到 | 在账号所在行勾选，仅影响该账号的自动签到与自动补领，不影响手动签到。设置在重启和移入另一账号池后保留；首次升级时未单独设置的账号继承原全局状态。 |
 | 代签到 | 可扫码添加，也可与微信账号池双向移动。代签到账号只参与自动签到，网关会从模型调用和价格探测中排除这些账号。移动保留签到记录 |
 | 改名 / 移除 | 备注只存本地标签文件；移除是把凭据移到 `data/gateway/.disabled/`，不删除文件 |
 | Hermes 对接 | 显示 `base_url`、默认模型、脱敏 API Key；可复制 provider JSON、配置命令和完整 Key |
@@ -133,11 +166,13 @@ python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 p
 - 「补签」与「手动签到」均经同一个本地签到执行器，不清零已用尝试次数；启动补签已排队且自动签到开启时，等待原队列执行。接近北京时间午夜不发起跨日请求。
 - 关闭自动签到后，已发出的请求不会被取消；重新开启不会改写已有计划。主机休眠期间不会执行自动签到。
 
-## 调度策略：到期日最短优先（expireFirst）
+签到以外的积分，在 WorkBuddy 官方客户端头像菜单的「Buddy 加油站」「去邀约」「成长计划」，或[个人中心 → 套餐与用量](https://www.workbuddy.cn/profile/plans-usage)按当前账号的资格领取。成长计划中仅标为积分的奖励可计入余额，能量不是积分。已接入账号的官方余额由网关定期查询并同步到控制台和 CC Switch，不需要手工录入；「刷新状态」只是读取最近的网关快照，不会领取奖励。
 
-- 容器环境变量 `WB_SCHEDULING_STRATEGY=expireFirst` 开启（仓库默认已开）：同优先级可用账号不再轮换，而是固定选「积分周期到期最早」的账号，把它先用完再自然落到下一个；到期相同/未知时退回轮询顺序。缺省或删除该变量即恢复上游轮询行为。
-- 到期时间来自上游完整权益接口中每个有效资源包的扣减周期截止，按 `DeductionEndTime > ExpiredTime > CycleEndTime` 取最早的一个，额度周期刷新后自动更新；账号级展示在状态快照的 `quotaExpireAt` 字段。
-- 选号层级保持上游语义（免费耗尽账号优先 → 有余额账号 → 零余额受控探测），expireFirst 只在每一层级内部比较到期时间；账号黑白名单、冷却与失效排除规则不受影响。
+## 调度策略：有余额的积分批次到期优先（expireFirst）
+
+- 容器默认开启 `WB_SCHEDULING_STRATEGY=expireFirst`。在同一调度层级中，置顶规则不变；普通候选按尚有余额的有效积分批次最早失效时间排序，到期相同或均未知时按轮询。关闭该变量后不按到期排序。
+- 控制台可展开查看上游已确认的批次总额、已用、剩余和到期时间。批次截止取积分周期和权益截止中较早的时间，不用套餐日期代替批次余额。已耗尽、已过期、数据缺失或过旧的批次不参与到期排序。
+- 只影响网关选择哪个账号；实际扣减批次由 WorkBuddy 决定。免费、普通、零余额探测层级及保留积分、黑白名单、冷却和失效规则不变。
 
 ## 验证
 
@@ -145,6 +180,7 @@ python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 p
 python3 -B scripts/selftest.py          # 不触碰真实账号
 python3 -B scripts/test_providers.py    # 自定义提供商持久化、校验与命令导出
 python3 -B scripts/test_console.py      # 守护退避、缓存并发、登录会话与日志修剪
+python3 -B scripts/test_permissions.py  # 先在虚拟环境安装 requirements-permissions.txt
 python3 -B scripts/test_inference_probe.py # 流式结束、错误帧及模型匹配
 docker compose config --quiet
 docker compose ps

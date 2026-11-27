@@ -17,17 +17,20 @@ from controller import BRIDGE_PORT, HOST_BIND_IP, ROOT, WEB_DATA, Controller, Ga
 from usage_bridge import build_server
 
 TEMPLATE = Path(os.environ.get("CONFIG_TEMPLATE", "/app/config/config.json.example"))
-WEB_TOKEN = WEB_DATA / "web.token"
 BRIDGE_TOKEN = WEB_DATA / "bridge.token"
 
 
 def ensure_token(path: Path) -> str:
     try:
-        return private_read(path).strip()
-    except OSError:
+        token = private_read(path).strip()
+    except FileNotFoundError:
         token = secrets.token_urlsafe(36)
-        private_write(path, token + "\n")
-        return token
+        atomic(path, (token + "\n").encode("ascii"))
+    if not token:
+        raise ValueError(f"令牌文件为空：{path.name}")
+    if not token.isascii():
+        raise ValueError(f"令牌文件必须使用 ASCII 字符：{path.name}")
+    return token
 
 
 def trim_logs(root: Path, keep_bytes: int = 5 * 1024 * 1024) -> None:
@@ -48,7 +51,7 @@ def trim_logs(root: Path, keep_bytes: int = 5 * 1024 * 1024) -> None:
             pass
 
 
-def init() -> tuple[str, str]:
+def init() -> str:
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     WEB_DATA.mkdir(mode=0o700, parents=True, exist_ok=True)
     (ROOT / "logs").mkdir(mode=0o700, exist_ok=True)
@@ -66,9 +69,8 @@ def init() -> tuple[str, str]:
         private_write(cfg, json.dumps(doc, ensure_ascii=False, indent=2))
         print("[boot] generated private config.json with fresh API/admin keys", flush=True)
 
-    web_token = ensure_token(WEB_TOKEN)
     bridge_token = ensure_token(BRIDGE_TOKEN)
-    return web_token, bridge_token
+    return bridge_token
 
 
 def build_permissions_server(controller: Controller):
@@ -85,19 +87,15 @@ def build_permissions_server(controller: Controller):
                          max_request_body_size=1_000_000)
 
 
-def console_server(controller: Controller, web_token: str):
-    if os.environ.get("WB_CONSOLE_PERMISSIONS") == "1":
-        return build_permissions_server(controller), True
-    from web import build_web_server
-
-    return build_web_server(controller, web_token), False
+def console_server(controller: Controller):
+    return build_permissions_server(controller)
 
 
 def main() -> None:
-    web_token, bridge_token = init()
+    bridge_token = init()
     gateway = Gateway()
     controller = Controller(gateway)
-    httpd, permissions_enabled = console_server(controller, web_token)
+    httpd = console_server(controller)
     gateway.start()
     threading.Thread(target=gateway.supervise, daemon=True, name="gateway-supervisor").start()
     print(f"[boot] gateway {gateway.version} started (supervisor active)", flush=True)
@@ -109,29 +107,19 @@ def main() -> None:
     print("=" * 56, flush=True)
     print(f"WEB_CONSOLE_URL = http://{HOST_BIND_IP}:{os.environ.get('HOST_WEB_PORT', '8080')}/", flush=True)
     print(f"WEB_CONSOLE_USER = admin", flush=True)
-    if not permissions_enabled:
-        print("WEB_CONSOLE_TOKEN_FILE = /data/web/web.token", flush=True)
     print("=" * 56, flush=True)
 
     def stop(*_args):
-        if permissions_enabled:
-            raise KeyboardInterrupt
-        threading.Thread(target=httpd.shutdown, daemon=True).start()
+        raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        if permissions_enabled:
-            httpd.run()
-        else:
-            httpd.serve_forever(poll_interval=0.5)
+        httpd.run()
     finally:
         bridge.shutdown()
         gateway.shutdown()
-        if permissions_enabled:
-            httpd.close()
-        else:
-            httpd.server_close()
+        httpd.close()
 
 
 if __name__ == "__main__":

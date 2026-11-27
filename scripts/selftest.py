@@ -136,8 +136,8 @@ check("web: separate manual check-in action", 'class="sm manualCheckinBtn"' in p
 check("web: check-in status rendering present", "badge" in page and "今日签到" in page)
 sidenav = page[page.index('id="sidenav"'):page.index("</nav>")]
 nav_hrefs = re.findall(r'<a href="#(\w+)"', re.sub(r"<!--.*?-->", "", sidenav, flags=re.S))
-check("web: nav order is account pool → models → hermes → bridge",
-      nav_hrefs == ["acctCard", "modelsCard", "hermesCard", "bridgeCard"])
+check("web: navigation includes both account pools and all setup pages in order",
+      nav_hrefs == ["acctCard", "checkinOnlyCard", "modelsCard", "hermesCard", "bridgeCard", "setupGuideCard"])
 check("web: default tab is the first nav item",
       "activateTab(navLinks[0])" in page and nav_hrefs[:1] == ["acctCard"])
 

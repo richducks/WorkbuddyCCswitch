@@ -44,6 +44,7 @@ BRIDGE_PORT = int(os.environ.get("BRIDGE_PORT", "8318"))
 HOST_BRIDGE_PORT = int(os.environ.get("HOST_BRIDGE_PORT", str(BRIDGE_PORT)))
 LOGIN_TIMEOUT = int(os.environ.get("LOGIN_TIMEOUT", "300"))
 AUTO_DISABLED_FILE = "auto-checkin.disabled"
+ACCOUNT_AUTO_CHECKIN_SUFFIX = ".auto-checkin"
 FILE_RE = re.compile(r"^workbuddy[0-9]*\.json$")
 URL_RE = re.compile(r"https://copilot\.tencent\.com/login\?[^\s\u2580-\u25ff]+")
 
@@ -195,6 +196,10 @@ class Controller:
         self._login_lock = threading.Lock()
         self._labels_lock = threading.Lock()
         self.labels_path = WEB_DATA / "labels.json"
+        self._reserves_lock = threading.Lock()
+        self.reserves_path = ROOT / "reserve.json"
+        self._pins_lock = threading.Lock()
+        self.pins_path = ROOT / "pins.json"
         self.provider_registry = ProviderRegistry(WEB_DATA / "providers.json")
         self._catalog: list[dict] = []
         self._catalog_refresh_at = 0.0
@@ -223,6 +228,57 @@ class Controller:
             data[filename] = label
             private_write(self.labels_path, json.dumps(data, ensure_ascii=False))
 
+    # ---------- reserve quotas (gateway hot-reloads ROOT/reserve.json) ----------
+    DEFAULT_RESERVE = 100.0
+
+    def reserves(self) -> dict[str, float]:
+        try:
+            data = json.loads(private_read(self.reserves_path))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items()
+                if isinstance(k, str) and isinstance(v, (int, float))
+                and not isinstance(v, bool) and v == v and 0 <= v < float("inf")}
+
+    def set_reserve(self, filename: str, reserve: float) -> None:
+        if not FILE_RE.match(filename):
+            raise ValueError("文件名无效")
+        if not isinstance(reserve, (int, float)) or isinstance(reserve, bool) \
+                or not (0 <= reserve < float("inf")) or reserve != reserve:
+            raise ValueError("保留额度必须是非负数字")
+        with self._reserves_lock:
+            data = self.reserves()
+            data[filename] = reserve
+            atomic(self.reserves_path, json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+    # ---------- pinned accounts (gateway hot-reloads ROOT/pins.json) ----------
+    def pins(self) -> dict[str, int]:
+        """置顶账号：文件名 → 置顶顺序（1 最优先）。网关选号时先消耗置顶账号。"""
+        try:
+            data = json.loads(private_read(self.pins_path))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {name: rank for name, rank in data.items()
+                if isinstance(name, str) and isinstance(rank, int) and not isinstance(rank, bool) and rank >= 1}
+
+    def set_pin(self, filename: str, pinned: bool) -> None:
+        if not isinstance(pinned, bool):
+            raise ValueError("置顶参数必须为布尔值")
+        if not FILE_RE.match(filename):
+            raise ValueError("文件名无效")
+        with self._pins_lock:
+            data = self.pins()
+            if pinned:
+                if filename not in data:
+                    data[filename] = (max(data.values()) + 1) if data else 1
+            else:
+                data.pop(filename, None)
+            atomic(self.pins_path, json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
     def alias(self, filename: str, index: int) -> str:
         return self.labels().get(filename) or f"账号 {index} · {filename}"
 
@@ -238,11 +294,14 @@ class Controller:
     def status(self) -> dict:
         doc = self._status_doc()
         today = day()
-        auto_enabled = self.auto_checkin_enabled()
+        auto_default = self.auto_checkin_enabled()
         updated = doc.get("updatedAt")
-        manual_available = (self.gateway.alive() and (WEB_DATA / "manual-checkin.sock").is_socket()
-                            and isinstance(updated, (int, float)) and -5 <= time.time() - updated <= 35)
+        snapshot_fresh = type(updated) in (int, float) and -5 <= time.time() - updated <= 35
+        manual_available = (snapshot_fresh and self.gateway.alive()
+                            and (WEB_DATA / "manual-checkin.sock").is_socket())
         labels = self.labels()
+        reserves = self.reserves()
+        pins = self.pins()
         by_file = {}
         for a in doc.get("accounts") or []:
             name = Path(a.get("path") or "").name
@@ -253,8 +312,9 @@ class Controller:
         accounts = []
         for i, name in enumerate(all_files, 1):
             a = by_file.get(name)
+            auto_enabled = self.account_auto_checkin_enabled(name, default=auto_default)
             c = (a or {}).get("checkin") or {}
-            current = c.get("date") == today
+            current = snapshot_fresh and c.get("date") == today
             state = str(c.get("status", "")) if current else ""
             checkin = {
                 "date": c.get("date"),
@@ -265,11 +325,20 @@ class Controller:
                 "nextAt": c.get("nextAt") if current and auto_enabled and manual_available else None,
                 "message": c.get("message", "") if current else "",
             }
-            eligible = bool(a and name in candidates({name: a}, [name], today))
+            eligible = bool(current and a and name in candidates({name: a}, [name], today))
             checkin_only = is_checkin_only(name)
+            # 成长值（只读查询结果）：仅展示当日数据，隔天的缓存直接丢弃，避免误报已领取。
+            g = (a or {}).get("growth") or {}
+            try:
+                g_day = datetime.fromtimestamp(g["updatedAt"], BJ).date() if g else None
+            except (KeyError, TypeError, ValueError, OSError, OverflowError):
+                g_day = None
+            growth = g if snapshot_fresh and g_day is not None and g_day.isoformat() == today else None
             accounts.append({
                 "file": name,
                 "checkinOnly": checkin_only,
+                "autoCheckinEnabled": auto_enabled,
+                "pinRank": pins.get(name, 0),
                 "label": labels.get(name) or f"账号 {i} · {name}",
                 "loaded": a is not None,
                 "edition": a.get("edition") if a else None,
@@ -282,8 +351,11 @@ class Controller:
                     "remaining": a.get("quotaRemaining") if a else None,
                     "known": a.get("quotaKnown") if a else None,
                     "expireAt": a.get("quotaExpireAt") if a else None,
+                    "batches": (a.get("creditBatches") or []) if snapshot_fresh else [],
+                    "reserve": reserves.get(name, self.DEFAULT_RESERVE) if a else None,
                 } if a else None,
                 "checkin": checkin,
+                "growth": growth,
                 "eligible": not checkin_only and eligible,
                 "manualEligible": bool(not checkin_only and manual_available and current and c.get("manualReady") is True),
             })
@@ -296,7 +368,7 @@ class Controller:
             "gatewayAlive": self.gateway.alive(),
             "updatedAt": doc.get("updatedAt"),
             "accounts": accounts,
-            "autoCheckinEnabled": auto_enabled,
+            "autoCheckinEnabled": auto_default,
             "sessions": sessions,
             "hermes": self.hermes(),
             "modelCatalog": self.model_catalog(),
@@ -453,6 +525,26 @@ class Controller:
         else:
             atomic(flag, b"disabled\n")
         return self.auto_checkin_enabled()
+
+    def account_auto_checkin_enabled(self, filename: str, *, default: bool) -> bool:
+        if not FILE_RE.fullmatch(filename):
+            return default
+        try:
+            return private_read(ROOT / (filename + ACCOUNT_AUTO_CHECKIN_SUFFIX)) == "enabled\n"
+        except FileNotFoundError:
+            return default
+        except (OSError, ValueError):
+            return False
+
+    def set_account_auto_checkin(self, filename: str, enabled: bool) -> bool:
+        if not FILE_RE.fullmatch(filename):
+            raise ValueError("凭据文件名无效")
+        with self._login_lock:
+            if not (ROOT / filename).is_file():
+                raise ValueError("凭据文件不存在")
+            value = b"enabled\n" if enabled else b"disabled\n"
+            atomic(ROOT / (filename + ACCOUNT_AUTO_CHECKIN_SUFFIX), value)
+        return enabled
 
     def manual_checkin(self, name: str) -> str:
         if not FILE_RE.fullmatch(name):

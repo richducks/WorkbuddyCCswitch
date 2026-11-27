@@ -43,6 +43,18 @@ def dispatch_console_api(c: Controller, method: str, path: str, query: dict, dat
         if path == "/api/labels":
             c.set_label(str(data.get("file", "")), str(data.get("label", "")))
             return 200, {"ok": True}
+        if path == "/api/reserve":
+            reserve = data.get("reserve")
+            if isinstance(reserve, bool) or not isinstance(reserve, (int, float)):
+                raise ValueError("保留额度必须是非负数字")
+            c.set_reserve(str(data.get("file", "")), reserve)
+            return 200, {"ok": True}
+        if path == "/api/pins":
+            pinned = data.get("pinned")
+            if not isinstance(pinned, bool):
+                raise ValueError("置顶参数必须为布尔值")
+            c.set_pin(str(data.get("file", "")), pinned)
+            return 200, {"ok": True}
         if path == "/api/checkin/manual":
             name = data.get("file")
             if not isinstance(name, str):
@@ -54,6 +66,11 @@ def dispatch_console_api(c: Controller, method: str, path: str, query: dict, dat
             enabled = data.get("enabled")
             if not isinstance(enabled, bool):
                 raise ValueError("自动签到开关必须为布尔值")
+            if "file" in data:
+                filename = data["file"]
+                if not isinstance(filename, str):
+                    raise ValueError("请选择账号")
+                return 200, {"enabled": c.set_account_auto_checkin(filename, enabled)}
             return 200, {"enabled": c.set_auto_checkin(enabled)}
         if path == "/api/checkin":
             files = data.get("files")

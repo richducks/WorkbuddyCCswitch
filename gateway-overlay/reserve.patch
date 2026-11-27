@@ -1,0 +1,40 @@
+diff --git a/debug.go b/debug.go
+index 1d17582..e39d5a3 100644
+--- a/debug.go
++++ b/debug.go
+@@ -343,6 +343,9 @@ func modelAccountAllowed(model string, acc *Account, pool []*Account) (bool, str
+ 			}
+ 		}
+ 	}
++	if reserveBlocked(acc) {
++		return false, "剩余积分低于保留额度"
++	}
+ 	modelAccountFilterMu.RLock()
+ 	rule, configured := modelAccountFilters[normalizeModelName(model)]
+ 	global, globalConfigured := modelAccountFilters["all"]
+diff --git a/main.go b/main.go
+index 045524a..9bee5ea 100644
+--- a/main.go
++++ b/main.go
+@@ -2711,7 +2711,11 @@ type accountSnapshot struct {
+ 	QuotaExhausted   bool  `json:"quotaExhausted,omitempty"`
+ 	QuotaUnlimited   bool  `json:"quotaUnlimited,omitempty"`
+ 	// 最早额度周期截止（积分到期时间，Unix 秒）；0=未知（未查询/企业号）。
+-	QuotaExpireAt  int64                         `json:"quotaExpireAt,omitempty"`
++	QuotaExpireAt int64 `json:"quotaExpireAt,omitempty"`
++
++	// 保留额度（积分数）：来自 ROOT/reserve.json；剩余积分低于该值的账号不参与调度。
++	Reserve        float64                       `json:"reserve,omitempty"`
++	ReserveBlocked bool                          `json:"reserveBlocked,omitempty"`
+ 	ModelStates    map[string]modelStateSnapshot `json:"modelStates,omitempty"`
+ 	FreeModels     int                           `json:"freeModels,omitempty"` // 旧版快照兼容字段；账号表不再显示，不参与调度
+ 	ModelCooldowns int                           `json:"modelCooldowns,omitempty"`
+@@ -2771,6 +2775,8 @@ func writeStatusSnapshot() error {
+ 		if !acc.QuotaExpireAt.IsZero() {
+ 			as.QuotaExpireAt = acc.QuotaExpireAt.Unix()
+ 		}
++		as.Reserve = reserveFor(filepath.Base(acc.Path))
++		as.ReserveBlocked = acc.QuotaKnown && !acc.QuotaUnlimited && as.Reserve > 0 && acc.QuotaRemaining < as.Reserve
+ 		if len(acc.ModelStates) > 0 {
+ 			as.ModelStates = make(map[string]modelStateSnapshot, len(acc.ModelStates))
+ 			for model, state := range acc.ModelStates {

@@ -1,0 +1,155 @@
+diff --git a/credentialedit.go b/credentialedit.go
+index d8d6bf5..098acf3 100644
+--- a/credentialedit.go
++++ b/credentialedit.go
+@@ -197,6 +197,7 @@ func saveEditedCredential(ctx context.Context, target, revision, content, trace
+ 	if identityChanged {
+ 		acc.QuotaKnown, acc.QuotaExhausted, acc.IsPaidUser = false, false, false
+ 		acc.QuotaUnlimited = false
++		acc.CreditBatches = creditBatchObservation{}
+ 		acc.QuotaTotal, acc.QuotaUsed, acc.QuotaRemaining = 0, 0, 0
+ 		acc.PlanLabel, acc.PlanCheckedAt, acc.PlanStale = "", 0, true
+ 		acc.ModelStates = nil
+diff --git a/main.go b/main.go
+index 10a2401..b4f86fe 100644
+--- a/main.go
++++ b/main.go
+@@ -487,7 +487,7 @@ type Account struct {
+ 	QuotaKnown     bool                          // 是否已成功获取过额度
+ 	QuotaExhausted bool                          // 已确认额度为 0；额度扫描发现恢复后自动解除
+ 	QuotaUnlimited bool                          // 企业版 limitNum=-1：分配额度不限，禁止按 0 余额阻断
+-	QuotaExpireAt  time.Time                     // 最近一次完整权益查询得到的最早额度周期截止（积分到期）；零值=未知
++	CreditBatches  creditBatchObservation        // 最近一次只读查询得到的批次余额
+ 	ModelStates    map[string]*modelRuntimeState // 按模型隔离的成本、限流和额度阻断状态
+ 	fingerprint    string                        // 凭据文件变更指纹（mtime+size，凭据热加载用）
+ 	lock           sync.RWMutex                  // 凭据维护写锁；模型发送共享读锁，并发数由 concurrent 控制
+@@ -1271,6 +1271,7 @@ func reloadAccountsResult() (bool, error) {
+ 		existing.QuotaKnown = false
+ 		existing.QuotaExhausted = false
+ 		existing.QuotaUnlimited = false
++		existing.CreditBatches = creditBatchObservation{}
+ 		existing.ModelStates = nil
+ 		existing.fingerprint = fp
+ 		clearDisabledMarker(p)
+@@ -1410,7 +1411,7 @@ func nextAccountForModel(model string, attempted map[*Account]bool) (*Account, a
+ 	now := time.Now()
+ 
+ 	// 置顶优先：同层级候选里 pins.json 置顶顺序最小者优先；置顶账号都不可用时，
+-	// 未置顶账号按原有策略选择（expireFirst 开启=额度到期最早优先，关闭=轮询距离）。
++	// 未置顶账号按原有策略选择（expireFirst 开启=仍有余额的批次到期优先，关闭=轮询距离）。
+ 	pick := func(siteFilter func(string) bool) (*Account, accountSelectionKind, bool) {
+ 		for _, wanted := range []accountSelectionKind{selectionFreeExhausted, selectionNormal, selectionProbeExhausted} {
+ 			bestIdx := -1
+@@ -1433,8 +1434,8 @@ func nextAccountForModel(model string, attempted map[*Account]bool) (*Account, a
+ 					continue
+ 				}
+ 				cmpEnd := time.Time{}
+-				if expireFirstEnabled() {
+-					cmpEnd = acc.QuotaExpireAt
++				if expireFirstEnabled() && wanted == selectionNormal {
++					cmpEnd = earliestQuotaEnd(acc.CreditBatches.current(now), now)
+ 				}
+ 				rank := pinRankFor(filepath.Base(acc.Path))
+ 				if bestIdx < 0 || pinCandidateBetter(bestRank, bestDist, bestEnd, rank, i, cmpEnd) {
+@@ -2129,13 +2130,14 @@ func parseEnterpriseJSONNumber(raw json.RawMessage) (float64, error) {
+ 
+ // applyQuotaObservation 写入额度并在余额恢复或不限量时解除模型额度阻断。
+ // 调用方可以持有账号锁；这里只取账号池锁。
+-func applyQuotaObservation(acc *Account, total, used, remaining float64, unlimited, paid bool, plan string, planOK bool, now time.Time) (wasExhausted, exhausted bool, display string) {
++func applyQuotaObservation(acc *Account, total, used, remaining float64, unlimited, paid bool, plan string, planOK bool, batches []creditBatch, now time.Time) (wasExhausted, exhausted bool, display string) {
+ 	accountMu.Lock()
+ 	defer accountMu.Unlock()
+ 	wasExhausted = acc.QuotaExhausted
+ 	acc.QuotaTotal = total
+ 	acc.QuotaUsed = used
+ 	acc.QuotaRemaining = remaining
++	acc.CreditBatches = creditBatchObservation{batches: batches, at: now}
+ 	acc.QuotaUnlimited = unlimited
+ 	acc.IsPaidUser = paid
+ 	if planOK {
+@@ -2360,10 +2362,9 @@ func refreshAccountQuota(ctx context.Context, acc *Account) error {
+ 	now := time.Now()
+ 	resources, planErr := fetchPlanResources(ctx, prof, headers, traceID, path, now)
+ 	if planErr == nil {
+-		setAccountQuotaExpiry(acc, resources, now)
+ 		plan, planErr = identifyPlan(prof.Key, summary, resources, now)
+ 	}
+-	wasExhausted, exhausted, plan := applyQuotaObservation(acc, total, used, remaining, false, paid, plan, planErr == nil, now)
++	wasExhausted, exhausted, plan := applyQuotaObservation(acc, total, used, remaining, false, paid, plan, planErr == nil, collectCreditBatches(resources, now), now)
+ 	if planErr != nil {
+ 		log.Printf("[套餐判断] traceId=%s 账号=%s 结果=待确认 原因=%v 显示=%s 业务影响=额度仍更新，不把接口失败误报为免费或试用", traceID, path, planErr, plan)
+ 	} else {
+@@ -2413,7 +2414,7 @@ func refreshEnterpriseAccountQuota(ctx context.Context, acc *Account, auth Store
+ 		return err
+ 	}
+ 	now := time.Now()
+-	wasExhausted, exhausted, plan := applyQuotaObservation(acc, total, used, remaining, unlimited, false, planEnterprise, true, now)
++	wasExhausted, exhausted, plan := applyQuotaObservation(acc, total, used, remaining, unlimited, false, planEnterprise, true, nil, now)
+ 	log.Printf("[套餐判断] traceId=%s 账号=%s 结果=%s 说明=企业号没有个人套餐资源包，不调用 get-user-resource，显示=%s", traceID, path, planEnterprise, plan)
+ 	totalText := formatQuotaAmount(unlimited, "total", total)
+ 	remainText := formatQuotaAmount(unlimited, "remaining", remaining)
+@@ -2708,8 +2709,9 @@ type accountSnapshot struct {
+ 	QuotaKnown       bool  `json:"quotaKnown,omitempty"`
+ 	QuotaExhausted   bool  `json:"quotaExhausted,omitempty"`
+ 	QuotaUnlimited   bool  `json:"quotaUnlimited,omitempty"`
+-	// 最早额度周期截止（积分到期时间，Unix 秒）；0=未知（未查询/企业号）。
+-	QuotaExpireAt int64 `json:"quotaExpireAt,omitempty"`
++	// 保留旧快照字段；现在仅代表有余额且未失效的已确认批次。
++	QuotaExpireAt int64         `json:"quotaExpireAt,omitempty"`
++	CreditBatches []creditBatch `json:"creditBatches,omitempty"`
+ 
+ 	// 保留额度（积分数）：来自 ROOT/reserve.json；剩余积分低于该值的账号不参与调度。
+ 	Reserve        float64                       `json:"reserve,omitempty"`
+@@ -2775,9 +2777,8 @@ func writeStatusSnapshot() error {
+ 		as.QuotaKnown = acc.QuotaKnown
+ 		as.QuotaExhausted = acc.QuotaExhausted
+ 		as.QuotaUnlimited = acc.QuotaUnlimited
+-		if !acc.QuotaExpireAt.IsZero() {
+-			as.QuotaExpireAt = acc.QuotaExpireAt.Unix()
+-		}
++		as.CreditBatches = acc.CreditBatches.current(now)
++		as.QuotaExpireAt = unixOrZero(earliestQuotaEnd(as.CreditBatches, now))
+ 		as.Reserve = reserveFor(filepath.Base(acc.Path))
+ 		as.ReserveBlocked = acc.QuotaKnown && !acc.QuotaUnlimited && as.Reserve > 0 && acc.QuotaRemaining < as.Reserve
+ 		as.PinRank = pinRankFor(filepath.Base(acc.Path))
+diff --git a/plans.go b/plans.go
+index cc9e70f..717ac3a 100644
+--- a/plans.go
++++ b/plans.go
+@@ -64,16 +64,20 @@ var nonPlanCodes = map[string]bool{
+ }
+ 
+ type planResource struct {
+-	AccountID          json.RawMessage `json:"AccountId"` // 官网可返回数字或字符串。
+-	ResourceID         string          `json:"ResourceId"`
+-	PackageCode        string          `json:"PackageCode"`
+-	PackageName        string          `json:"PackageName"`
+-	SubProductCode     string          `json:"SubProductCode"`
+-	Status             json.RawMessage `json:"Status"`
+-	DeductionStartTime json.RawMessage `json:"DeductionStartTime"`
+-	DeductionEndTime   json.RawMessage `json:"DeductionEndTime"`
+-	ExpiredTime        json.RawMessage `json:"ExpiredTime"`
+-	CycleEndTime       json.RawMessage `json:"CycleEndTime"`
++	AccountID                  json.RawMessage `json:"AccountId"` // 官网可返回数字或字符串。
++	ResourceID                 string          `json:"ResourceId"`
++	PackageCode                string          `json:"PackageCode"`
++	PackageName                string          `json:"PackageName"`
++	SubProductCode             string          `json:"SubProductCode"`
++	Status                     json.RawMessage `json:"Status"`
++	DeductionStartTime         json.RawMessage `json:"DeductionStartTime"`
++	DeductionEndTime           json.RawMessage `json:"DeductionEndTime"`
++	ExpiredTime                json.RawMessage `json:"ExpiredTime"`
++	CycleEndTime               json.RawMessage `json:"CycleEndTime"`
++	CapacityType               json.RawMessage `json:"CapacityType"`
++	CycleCapacitySizePrecise   json.RawMessage `json:"CycleCapacitySizePrecise"`
++	CycleCapacityRemainPrecise json.RawMessage `json:"CycleCapacityRemainPrecise"`
++	SlicePeriodUsageDetails    json.RawMessage `json:"SlicePeriodUsageDetails"`
+ }
+ 
+ func planInteger(raw json.RawMessage) (int64, error) {
+@@ -376,4 +380,5 @@ func markAccountPlanStale(acc *Account) {
+ 		acc.PlanLabel = planUnknown
+ 	}
+ 	acc.PlanStale = true
++	acc.CreditBatches = creditBatchObservation{}
+ }

@@ -59,7 +59,7 @@ def main() -> None:
 
     root = Path(__file__).resolve().parent.parent
     overlay_dir = root / "gateway-overlay"
-    patches = [overlay_dir / name for name in ("scheduler.patch", "expire-first.patch", "chat-stream-retry.patch", "checkin-only.patch")]
+    patches = [overlay_dir / name for name in ("scheduler.patch", "expire-first.patch", "chat-stream-retry.patch", "checkin-only.patch", "reserve.patch", "growth.patch", "pins.patch", "credit-batches.patch")]
     overlay_go = sorted(overlay_dir.glob("*.go"))
     if not all(patch.is_file() for patch in patches) or not overlay_go:
         fail(f"overlay 不完整：{overlay_dir}")
@@ -79,7 +79,7 @@ def main() -> None:
         test_env = os.environ.copy()
         test_env.update({"GOTOOLCHAIN": "local", "CGO_ENABLED": "0"})
         print("Running check-in, scheduling and inference resilience tests")
-        sh([str(go_cmd), "test", "-run", r"Checkin|CheckIn|ExpireFirst|EarliestQuotaEnd|ChatStreamRetry|StreamResilien|StreamTimeout|IdleReadCloser|NetworkError|UpstreamRetries|RateLimit|StreamChat.*Tool", "."], cwd=src, env=test_env)
+        sh([str(go_cmd), "test", "-run", r"Checkin|CheckIn|ExpireFirst|EarliestQuotaEnd|ChatStreamRetry|StreamResilien|StreamTimeout|IdleReadCloser|NetworkError|UpstreamRetries|RateLimit|Reserve|Pin|StreamChat.*Tool", "."], cwd=src, env=test_env)
 
         build_env = os.environ.copy()
         build_env.update({"GOTOOLCHAIN": "local", "CGO_ENABLED": "0",
