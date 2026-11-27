@@ -64,6 +64,24 @@ HOST_BRIDGE_PORT=28318
 
 没有 `bin/workbuddy-gateway-manual` 时先构建网关；之后运行 `docker compose -p workbuddy-acceptance up -d --build`，访问 `http://127.0.0.1:28080/`。验收后在该目录执行 `docker compose -p workbuddy-acceptance down` 停止测试实例，数据保留在该目录的 `data/`，不会影响原实例。不在两套实例中使用同一批微信账号。
 
+### 在 Linux 上重建现有容器
+
+在本机终端进入现有部署目录，先核对容器所属项目和数据挂载：
+
+```bash
+sudo docker inspect workbuddy-hermes --format '部署目录: {{index .Config.Labels "com.docker.compose.project.working_dir"}}{{range .Mounts}}{{println}}{{.Source}} -> {{.Destination}}{{end}}'
+```
+
+确认部署目录是当前目录，且 `data/gateway` 与 `data/web` 分别挂载到 `/data/gateway` 和 `/data/web`；目录不一致时先切到实际部署目录，不要用另一套空数据重建。如果网关补丁有更新，先运行 `python3 scripts/build_gateway.py`。备份本地数据后，重建并验证：
+
+```bash
+sudo docker compose up -d --build --wait workbuddy-hermes &&
+sudo docker compose exec -T workbuddy-hermes \
+  grep -n 'account-title-height' /app/app/static/index.html
+```
+
+如果本机的 `docker ps` 不需要 sudo，可以省略 sudo。无需放宽 Docker socket 权限。重建后刷新原控制台地址并检查账号池向上、向下滚动时标题保持可见。
+
 
 **可信局域网直接访问（可选，优先用 SSH 隧道）**：在 `.env` 中将 `BIND_IP` 改为 Docker 宿主机的具体私有 IPv4 地址，再运行 `docker compose up -d --build`。不支持 `0.0.0.0` 或公网地址。三个端口按配置发布到同一个地址：
 
@@ -120,12 +138,12 @@ ssh -NT -o ExitOnForwardFailure=yes \
 | 区域 | 内容 |
 |---|---|
 | 模型提供商 | WorkBuddy 作为内置项；其他服务可新增、编辑、移除接入预设，并导出命名的 Hermes 配置命令 |
-| 微信账号池 | 逐号显示凭据文件名、可自定义备注、加载状态、额度、积分到期时间（≤3 天高亮）、今日签到徽章（已签到 / 未签到 / 签到失败 / 待签到）、最近签到时间 |
+| 微信账号池 | 逐号显示凭据文件名、可自定义备注、加载状态、额度及分批已用、剩余和到期时间（≤3 天高亮）、今日签到徽章（已签到 / 未签到 / 签到失败 / 待签到）、最近签到时间 |
 | 添加微信账号 | 点击后容器执行 `login -auth workbuddyN.json`，网页实时显示终端二维码和备用登录链接；本人用目标微信号扫码授权，凭据写入独立文件，网关热加载自动加入账号池 |
 | 一键签到 / 单号签到 | 处理尚未尝试的待签或漏签国内个人账号；批量逐个执行并显示各账号结果。跳过已签到、已尝试或正在签到的账号；无需重启网关。 |
 | 自动签到 | 在账号所在行勾选，仅影响该账号的自动签到与自动补领，不影响手动签到。设置在重启和移入另一账号池后保留；首次升级时未单独设置的账号继承原全局状态。 |
 | 代签到 | 可扫码添加，也可与微信账号池双向移动。代签到账号只参与自动签到，网关会从模型调用和价格探测中排除这些账号。移动保留签到记录 |
-| 改名 / 移除 | 备注只存本地标签文件；移除是把凭据移到 `data/gateway/.disabled/`，不删除文件 |
+| 改名 / 移除 | 点击账号名称编辑，备注只存本地标签文件；移除是把凭据移到 `data/gateway/.disabled/`，不删除文件 |
 | Hermes 对接 | 显示 `base_url`、默认模型、脱敏 API Key；可复制 provider JSON、配置命令和完整 Key |
 | 模型目录 | 自动从网关 `/v1/models` 读取全部模型（含上下文/输出上限）；复制的 provider JSON 已含全量模型；新增模型后可一键复制刷新命令同步到宿主机 Hermes |
 | 用量桥 | 显示 CC Switch 应填写的 Base URL；用量刷新只读，不触发签到 |

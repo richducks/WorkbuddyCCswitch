@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline regressions for the console. No real credentials or gateway."""
+import base64
 import importlib
 import io
 import json
@@ -133,6 +134,25 @@ class ConsoleTests(unittest.TestCase):
 
     def test_existing_blank_token_fails_closed(self):
         token = self.web / "bridge.token"
+        token.write_text("\n")
+        with self.assertRaisesRegex(ValueError, "令牌文件为空"):
+            boot.ensure_token(token)
+
+    def test_non_ascii_login_tokens_are_rejected_without_crashing(self):
+        import web
+
+        handler = object.__new__(web.Handler)
+        handler.server = SimpleNamespace(token="fixture-token")
+        handler.headers = {"Authorization": "Basic " + base64.b64encode("admin:中文".encode()).decode()}
+        self.assertFalse(handler._auth())
+        handler._body = lambda: {"token": "中文"}
+        handler._send = Mock()
+        with patch.object(web, "_check_origin", return_value=True), patch.object(web.time, "sleep"):
+            handler._handle_login()
+        handler._send.assert_called_once_with(401, {"error": "令牌错误"})
+
+    def test_existing_blank_token_fails_closed(self):
+        token = self.web / "web.token"
         token.write_text("\n")
         with self.assertRaisesRegex(ValueError, "令牌文件为空"):
             boot.ensure_token(token)
