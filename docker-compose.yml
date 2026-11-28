@@ -21,6 +21,11 @@ services:
       HOST_WEB_PORT: "${HOST_WEB_PORT:-8080}"
       HOST_BRIDGE_PORT: "${HOST_BRIDGE_PORT:-8318}"
       LOGIN_TIMEOUT: "300"
+      # 控制台鉴权始终开启（/login 表单 + HttpOnly 会话 + CSRF），没有关闭开关。
+      # 可选：签到失败或积分 3 天内到期时推送提醒；留空即关闭。
+      WB_NOTIFY_WEBHOOK: "${WB_NOTIFY_WEBHOOK:-}"
+      WB_NOTIFY_KIND: "${WB_NOTIFY_KIND:-generic}"
+      WB_NOTIFY_INTERVAL: "${WB_NOTIFY_INTERVAL:-900}"
     ports:
       - "${BIND_IP:-127.0.0.1}:${HOST_WEB_PORT:-8080}:8080"
       - "${BIND_IP:-127.0.0.1}:${HOST_GW_PORT:-8317}:8317"

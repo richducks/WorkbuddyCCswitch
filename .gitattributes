@@ -3,3 +3,6 @@
 
 # Prevent CRLF checkout from corrupting the unified patch on Windows.
 *.patch text eol=lf
+
+# Keep shell scripts runnable on Windows checkouts (CRLF breaks bash).
+*.sh text eol=lf

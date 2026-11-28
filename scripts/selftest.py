@@ -14,7 +14,7 @@ sys.path.insert(0, str(APP))
 
 from usage_bridge import payload  # noqa: E402
 from checkin import candidates  # noqa: E402
-from controller import Controller, mask  # noqa: E402
+from controller import Controller, expiry_windows, mask  # noqa: E402
 
 failures = []
 
@@ -60,6 +60,20 @@ check("bridge: missed account shown", "未签到" in rows["entries"][1]["extra"]
 check("bridge: unknown quota marked invalid", rows["entries"][2]["isValid"] is False)
 stale = payload({**state, "updatedAt": int(now) - 600}, now)
 check("bridge: stale snapshot disables success claim", "未确认" in stale["entries"][0]["extra"])
+
+# 积分到期窗口：只统计仍可用额度，3 天/7 天分层，未知到期不夸大
+expiring = expiry_windows([
+    {"expireAt": int(now) + 2 * 86400, "quota": {"remaining": 500}},
+    {"expireAt": int(now) + 5 * 86400, "quota": {"remaining": 200}},
+    {"expireAt": int(now) + 30 * 86400, "quota": {"remaining": 9000}},
+    {"expireAt": None, "quota": {"remaining": 77}},
+])
+check("expiry: 3-day window sums only near-term quota", expiring["within3d"] == {"quota": 500.0, "accounts": 1})
+check("expiry: 7-day window adds the 5-day account", expiring["within7d"] == {"quota": 700.0, "accounts": 2})
+check("expiry: earliest end reported", expiring["earliestAt"] == int(now) + 2 * 86400)
+check("expiry: unknown/inactive accounts ignored", expiry_windows(
+    [{"expireAt": 0, "quota": {"remaining": 5}}, {"expireAt": int(now) + 86400, "quota": {"remaining": 0}}]
+)["within7d"] == {"quota": 0.0, "accounts": 0})
 
 by_file = {Path(a["path"]).name: a for a in state["accounts"]}
 picked = candidates(by_file, list(by_file), today)
@@ -125,9 +139,22 @@ with tempfile.TemporaryDirectory() as td:
     c.set_label("workbuddy.json", "我的主号")
     check("controller: custom label stored", c.labels()["workbuddy.json"] == "我的主号")
     (root / "config.json").write_text(json.dumps({"gateway": {"apiKey": "k" * 40}}))
+    (root / "workbuddy-status.json").write_text(json.dumps({
+        "updatedAt": int(now),
+        "accounts": [{
+            "path": str(root / "workbuddy.json"), "edition": "cn", "state": "active",
+            "schedulingEnabled": True, "uid": "uid-A", "quotaTotal": 100, "quotaUsed": 10,
+            "quotaRemaining": 90, "quotaKnown": True, "quotaExpireAt": int(now) + 86400,
+            "checkin": {"date": today, "status": "success", "attempts": 1},
+        }],
+    }, ensure_ascii=False))
     check("controller: hermes endpoint built", c.hermes()["endpoint"].endswith("/v1"))
     check("controller: key masked in view", "k" * 40 not in json.dumps(c.status(), ensure_ascii=False))
     check("controller: failed catalog fetch cached briefly", c.model_catalog() == [])
+    status = c.status()
+    check("controller: quota expiry exposed per account", status["accounts"][0]["expireAt"] == int(now) + 86400)
+    check("controller: expiry remaining days computed", status["accounts"][0]["expireIn"] == 1)
+    check("controller: expiry window summarised", status["expiry"]["within3d"] == {"quota": 90.0, "accounts": 1})
 
 page = (APP / "static" / "index.html").read_text(encoding="utf-8")
 check("web: add-account button present", "添加微信账号" in page)
@@ -141,6 +168,14 @@ check("web: navigation includes both account pools and all setup pages in order"
 check("web: default tab is the first nav item",
       "activateTab(navLinks.find(link => link.hash === location.hash) || navLinks[0])" in page
       and nav_hrefs[:1] == ["acctCard"])
+
+check("web: sidebar collapses to chips below 920px", "@media (max-width: 920px)" in page and "flex-wrap: wrap" in page)
+check("web: expiry warnings rendered", 'id="expiryBar"' in page and "b-num" in page and "expiryText" in page)
+check("web: per-account expiry rendering present", "function expiryNote" in page)
+check("web: provider presets stay hidden pending the product decision", 'id="providersCard" hidden' in page)
+
+compose = (APP.parent / "docker-compose.yml").read_text(encoding="utf-8")
+check("compose: console authentication cannot be disabled by an env flag", "NOAUTH" not in compose)
 
 print(f"\n{len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

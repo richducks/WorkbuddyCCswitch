@@ -171,6 +171,10 @@ sqlite3 -readonly "$HOME/.cc-switch/cc-switch.db" '.backup data/web/cc-switch-ex
 docker compose stop workbuddy-hermes
 bash scripts/backup-current.sh      # 私有备份，退出非零时不可用于恢复
 # 进入打印的备份目录，执行 sha256sum -c SHA256SUMS（macOS: shasum -a 256 -c SHA256SUMS）。
+
+# 定时备份与保留策略（crontab -e）：每天 03:10 一份、保留最近 14 份
+# 10 3 * * * cd /path/to/WorkbuddyCCswitch && bash scripts/backup-current.sh --keep 14 >> backup.log 2>&1
+# 还支持 --backup-dir DIR 指定其他备份根目录；--keep 0 表示不清理旧备份。
 ```
 
 恢复时保持实例停止，将备份的 `docker-gateway/`、`docker-web/` 分别复制到部署目录的 `data/gateway/`、`data/web/`。如需恢复端口和绑定设置，可从备份中的 `stack.env` 恢复 `.env`；再运行 `docker compose up -d --wait`。
@@ -194,6 +198,10 @@ python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 p
 
 预设保存在 `data/web/providers.json`，由 Docker 数据卷持久化。控制台不请求这些自定义地址，也不代理推理；API 地址应由 **Hermes 所在宿主机** 可达。宿主机运行 Hermes 时，本机 Ollama 的 OpenAI 兼容地址可填 `http://127.0.0.1:11434/v1`，模型填写已安装的对话模型 ID。OAuth 提供商仍用 Hermes 原生授权；第三方提供商不参与 WorkBuddy 签到和额度统计。
 
+## 外发提醒（可选）
+
+`WB_NOTIFY_WEBHOOK` 配置后，控制台会周期性巡检两类事件并推送：账号今日签到失败、积分在 3 天内到期（含已到期未消耗）。通知服务不可达时会在下一轮自动重试；同一条提醒去重后 30 天内不会重复发送。`WB_NOTIFY_KIND` 支持 `telegram` / `dingtalk` / `feishu` / `generic`（默认 POST JSON 文本），`WB_NOTIFY_INTERVAL` 为巡检间隔秒数（默认 900）。去重状态保存在 `data/web/notify-state.json`（0600 权限）。
+
 ## 签到说明
 
 - 国内个人账号由网关按北京时间自动签到：08:00–09:30 随机发起，失败在 09:30–10:00 重试。
@@ -213,6 +221,8 @@ python3 scripts/refresh-hermes-models.py   # 默认用 127.0.0.1:8317；只改 p
 
 ```bash
 python3 -B scripts/selftest.py          # 不触碰真实账号
+python3 -B scripts/test_notify.py       # 提醒去重、到期窗口与状态文件
+python3 scripts/check_upstream.py       # 检查钉住的上游网关是否有新版本、补丁是否仍可应用
 python3 -B scripts/test_providers.py    # 自定义提供商持久化、校验与命令导出
 python3 -B scripts/test_console.py      # 守护退避、缓存并发、登录会话与日志修剪
 python3 -B scripts/test_permissions.py  # 先在虚拟环境安装 requirements-permissions.txt

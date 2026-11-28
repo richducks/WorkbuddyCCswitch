@@ -6,6 +6,7 @@ only exposes non-identifying labels to the web console.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
@@ -82,6 +83,52 @@ def mask(value: str) -> str:
     if len(value) <= 10:
         return "***"
     return value[:4] + "***" + value[-4:]
+
+
+def _epoch(value: object) -> int | None:
+    """Normalise a gateway epoch-seconds field; anything else means unknown."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = int(value)
+    return value if value > 0 else None
+
+
+def _expire_in(expire_at: int | None, now: float | None = None) -> int | None:
+    """Whole days left before the quota window closes (negative once passed).
+
+    Future windows round up so a TTL of 23h still reads "1 天"; past ones round
+    down so "已过期" never shows 0.
+    """
+    if expire_at is None:
+        return None
+    delta = expire_at - (time.time() if now is None else now)
+    return math.floor(delta / 86400) if delta < 0 else math.ceil(delta / 86400)
+
+
+def expiry_windows(accounts: list[dict], now: float | None = None) -> dict:
+    """Sum still-usable quota per expiry window for the console warning bar.
+
+    Windows are measured from now to the earliest quota period end reported by
+    the gateway (`quotaExpireAt`). Accounts with unknown or expired windows are
+    left out entirely so the numbers never overstate what can still be spent.
+    """
+    now = time.time() if now is None else now
+    windows = {"within3d": 3, "within7d": 7}
+    out: dict[str, dict[str, float]] = {name: {"quota": 0.0, "accounts": 0.0} for name in windows}
+    earliest: int | None = None
+    for account in accounts:
+        expire_at = _epoch(account.get("expireAt"))
+        if expire_at is None:
+            continue
+        remaining = (account.get("quota") or {}).get("remaining")
+        if isinstance(remaining, bool) or not isinstance(remaining, (int, float)) or remaining <= 0:
+            continue
+        earliest = expire_at if earliest is None else min(earliest, expire_at)
+        for name, days in windows.items():
+            if expire_at - now <= days * 86400:
+                out[name]["quota"] += float(remaining)
+                out[name]["accounts"] += 1
+    return {**out, "earliestAt": earliest}
 
 
 class Gateway:
@@ -343,6 +390,7 @@ class Controller:
             except (KeyError, TypeError, ValueError, OSError, OverflowError):
                 g_day = None
             growth = g if snapshot_fresh and g_day is not None and g_day.isoformat() == today else None
+            expire_at = _epoch(a.get("quotaExpireAt")) if a else None
             accounts.append({
                 "file": name,
                 "checkinOnly": checkin_only,
@@ -363,6 +411,8 @@ class Controller:
                     "batches": (a.get("creditBatches") or []) if snapshot_fresh else [],
                     "reserve": reserves.get(name, self.DEFAULT_RESERVE) if a else None,
                 } if a else None,
+                "expireAt": expire_at,
+                "expireIn": _expire_in(expire_at),
                 "checkin": checkin,
                 "growth": growth,
                 "eligible": not checkin_only and eligible,
@@ -377,6 +427,7 @@ class Controller:
             "gatewayAlive": self.gateway.alive(),
             "updatedAt": doc.get("updatedAt"),
             "accounts": accounts,
+            "expiry": expiry_windows(accounts),
             "autoCheckinEnabled": auto_default,
             "sessions": sessions,
             "hermes": self.hermes(),

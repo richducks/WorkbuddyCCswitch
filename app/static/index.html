@@ -97,6 +97,16 @@
   #modelIds code { overflow-wrap: anywhere; }
   .provider-row a { color: var(--accent); text-decoration: none; }
   .provider-row a:hover { text-decoration: underline; }
+  .banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
+            padding: 11px 14px; border-radius: 10px; font-size: 13px;
+            border: 1px solid var(--border); background: var(--panel); }
+  .banner.warn { border-color: rgba(210,153,34,.5); background: rgba(210,153,34,.10); }
+  .banner.bad { border-color: rgba(248,81,73,.45); background: rgba(248,81,73,.10); }
+  .banner[hidden] { display: none; }
+  .banner .b-num { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .expiry { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 3px; }
+  .expiry.close { color: var(--warn); font-weight: 600; }
+  .expiry.past { color: var(--bad); font-weight: 600; }
   .toast { position: fixed; right: 20px; bottom: 20px; max-width: 420px; z-index: 50;
            background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
            border-radius: 8px; padding: 12px 16px; box-shadow: 0 12px 30px rgba(0,0,0,.4); display: none; }
@@ -278,6 +288,10 @@
     <section class="card wide" id="acctCard">
       <h2>WorkBuddy 微信账号池 <span class="n" id="acctCount"></span></h2>
       <p class="hint" id="firstAccountHint" hidden>先扫码接入一个 WorkBuddy 账号，再到「Hermes 对接」复制客户端配置。</p>
+      <div class="banner" id="expiryBar" hidden>
+        <span>积分到期预警</span>
+        <span id="expiryText"></span>
+      </div>
       <div class="table-wrap account-table">
       <table>
         <thead><tr>
@@ -575,6 +589,32 @@ function badge(status, label) {
   return `<span class="badge ${cls}"><span class="dot"></span>${esc(label)}</span>`;
 }
 
+function renderExpiry(d) {
+  const bar = $('#expiryBar');
+  if (!bar) return;
+  const e = d.expiry || {};
+  const w3 = e.within3d || {quota: 0, accounts: 0};
+  const w7 = e.within7d || {quota: 0, accounts: 0};
+  if (!w7.accounts) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.className = 'banner ' + (w3.accounts ? 'bad' : 'warn');
+  const earliest = e.earliestAt ? ` · 最早 ${fmtTime(e.earliestAt)}` : '';
+  $('#expiryText').innerHTML =
+    `7 天内到期 <span class="b-num">${fmtQuota(w7.quota)}</span> 积分（${w7.accounts} 个账号）` +
+    (w3.accounts ? `，其中 3 天内 <span class="b-num">${fmtQuota(w3.quota)}</span> 积分（${w3.accounts} 个账号）` : '') +
+    esc(earliest);
+}
+function expiryNote(a) {
+  if (!a.expireAt) return '';
+  const days = a.expireIn;
+  let cls = 'expiry';
+  if (typeof days === 'number' && days < 0) cls += ' past';
+  else if (typeof days === 'number' && days <= 3) cls += ' close';
+  const text = typeof days === 'number'
+    ? `积分到期 ${fmtTime(a.expireAt)}${days < 0 ? '（已过期）' : `（剩 ${days} 天）`}`
+    : `积分到期 ${fmtTime(a.expireAt)}`;
+  return `<div class="${cls}">${esc(text)}</div>`;
+}
 function renderAccounts(accounts, id, autoDefault, canChangeAuto, canManageAccounts) {
   $(`#${id}Count`).textContent = `共 ${accounts.length} 个`;
   const body = $(`#${id}Body`);
@@ -638,7 +678,7 @@ function renderAccounts(accounts, id, autoDefault, canChangeAuto, canManageAccou
     return `<tr>
       <td class="acctNameCell">${name}<div class="file">${file}</div></td>
       <td><div>${source}</div><div class="file">${a.loaded ? '已加载' : '文件存在，待热加载'}</div></td>
-      <td data-label="额度（积分）">${quota}</td>
+      <td data-label="额度（积分）">${quota}${expiryNote(a)}</td>
       ${reserveCell}
       <td data-label="今日签到">${chk}${growthLine}
         ${autoEnabled && c.nextAt ? `<div class="file" style="margin-top:3px">计划${c.status === 'failed' ? '重试' : '签到'}：${fmtTime(c.nextAt)}</div>` : ''}
@@ -678,6 +718,7 @@ function render(d) {
   const canManageAccounts = permissions?.accounts !== false;
   renderAccounts(d.accounts.filter(a => !a.checkinOnly), 'acct', d.autoCheckinEnabled, canChangeAuto, canManageAccounts);
   renderAccounts(d.accounts.filter(a => a.checkinOnly), 'checkinOnly', d.autoCheckinEnabled, canChangeAuto, canManageAccounts);
+  renderExpiry(d);
 
   const h = d.hermes;
   $('#hEndpoint').textContent = h.endpoint;
