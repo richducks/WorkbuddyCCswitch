@@ -19,10 +19,14 @@ import datetime
 import json
 import os
 import sqlite3
+import tempfile
+from contextlib import closing
+from pathlib import Path
 
 DB = os.path.expanduser("~/.hermes/behavior_ledger.db")
 OUT = os.path.expanduser("~/.hermes/reports/usage_dashboard.html")
 TZ = "'unixepoch', '+8 hours'"
+BJ = datetime.timezone(datetime.timedelta(hours=8))
 
 WD_ZH = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 0: "周日"}
 
@@ -35,7 +39,7 @@ def load(db):
     tz = TZ
     # KPI 总览 (两链合并, 成本按链拆开)
     (n_req, cost, credit, in_tok, out_tok, cache_tok, max_ts) = q(db, f"""
-        SELECT COUNT(*), ROUND(SUM(total_cost_usd), 2), ROUND(SUM(cost_credit), 1),
+        SELECT COUNT(*), ROUND(SUM(total_cost_usd), 4), ROUND(SUM(cost_credit), 4),
                SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
                MAX(created_ts) FROM requests""")[0]
     (codex_req, gw_req) = q(db, """
@@ -55,13 +59,13 @@ def load(db):
     dm = q(db, f"""
         SELECT date(created_ts, {tz}) AS day, chain,
                COALESCE(NULLIF(resolved_model, ''), model) AS model, COUNT(*) AS req,
-               COALESCE(ROUND(SUM(total_cost_usd), 4), 0) AS usd,
-               COALESCE(ROUND(SUM(cost_credit), 4), 0) AS credit
+               COALESCE(SUM(total_cost_usd), 0) AS usd,
+               COALESCE(SUM(cost_credit), 0) AS credit
         FROM requests GROUP BY day, chain, COALESCE(NULLIF(resolved_model, ''), model) ORDER BY day""")
     # 按天 token (缓存命中率, 两链合并)
     dt = q(db, f"""
         SELECT date(created_ts, {tz}) AS day,
-               SUM(input_tokens) AS in_tok, SUM(cache_read_tokens) AS cache_tok
+               COALESCE(SUM(input_tokens), 0) AS in_tok, COALESCE(SUM(cache_read_tokens), 0) AS cache_tok
         FROM requests GROUP BY day ORDER BY day""")
 
     # 时段 (0-23) 全程汇总: (请求数, 美元, 点数)
@@ -76,8 +80,8 @@ def load(db):
     for wd, hh, req, usd, credit_ in q(db, f"""
             SELECT strftime('%w', created_ts, {tz}) AS wd,
                    strftime('%H', created_ts, {tz}) AS hh, COUNT(*),
-                   COALESCE(ROUND(SUM(total_cost_usd), 4), 0),
-                   COALESCE(ROUND(SUM(cost_credit), 4), 0)
+                   COALESCE(SUM(total_cost_usd), 0),
+                   COALESCE(SUM(cost_credit), 0)
             FROM requests GROUP BY wd, hh"""):
         wh[(int(wd), int(hh))] = (req, usd, credit_)
 
@@ -112,18 +116,18 @@ def build_payload(raw):
     days[i]: cost=WorkBuddy链美元, credit=网关链点数, parts/credit_parts 各自按本单位排序。
     wh rows: [请求数24, 美元24, 点数24] — 热度用请求数 (两链成本单位不同, 不能混着上色)。
     """
-    kpi = raw["kpi"]
-    max_dt = datetime.datetime.fromtimestamp(kpi["max_ts"], datetime.timezone(datetime.timedelta(hours=8)))
-    last_day = max_dt.date()
+    kpi = dict(raw["kpi"])
+    max_dt = datetime.datetime.fromtimestamp(kpi["max_ts"], BJ) if kpi["max_ts"] is not None else None
+    last_day = max_dt.date() if max_dt else None
 
     # --- 连续日期轴 (缺数据日补零) ---
     dm = {}
     for r in raw["day_model"]:
         dm.setdefault(r["day"], []).append(r)
     tok = {r["day"]: r for r in raw["day_tok"]}
-    days, first = [], datetime.date.fromisoformat(min(dm))
-    d = first
-    while d <= last_day:
+    days = []
+    d = datetime.date.fromisoformat(min(dm)) if dm else None
+    while d is not None and d <= last_day:
         ds = d.isoformat()
         rows = dm.get(ds, [])
         parts = sorted((r for r in rows if r["chain"] == "codex"), key=lambda r: -r["usd"])
@@ -168,9 +172,7 @@ def build_payload(raw):
             hrs = sorted(raw["day_hour"].get(ds, {}).get(chain, []))
             if hrs:
                 # 元组 = (时, 次数, 美元, 点数); 只保留有量的小时 (稀疏)
-                det["hours"][chain] = [[r[0], r[idx], r[1]] for r in
-                                       sorted((r for r in hrs if r[idx] > 0 or r[1] > 0),
-                                              key=lambda r: r[0])]
+                det["hours"][chain] = [[r[0], round(r[idx], 4), r[1]] for r in hrs]
             mrows = sorted((r for r in rows if r["chain"] == chain),
                            key=lambda r: -(r["usd"] if chain == "codex" else r["credit"]))
             if mrows:
@@ -183,11 +185,11 @@ def build_payload(raw):
     tot_cache = kpi["cache_tok"] or 0
     tot_in = kpi["in_tok"] or 0
     kpi["cache_rate"] = round(100.0 * tot_cache / (tot_cache + tot_in), 1) if (tot_cache + tot_in) else None
-    kpi["max_dt"] = max_dt.strftime("%Y-%m-%d %H:%M")
+    kpi["max_dt"] = max_dt.strftime("%Y-%m-%d %H:%M") if max_dt else None
     kpi["range"] = f"{days[0]['day']} ~ {days[-1]['day']}" if days else ""
     return {"kpi": kpi, "days": days, "hourly": hourly, "wh": wh,
             "day_detail": day_detail,
-            "generated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+            "generated": datetime.datetime.now(BJ).strftime("%Y-%m-%d %H:%M")}
 
 
 HTML = r"""<!DOCTYPE html>
@@ -250,6 +252,11 @@ function niceMax(v) {
 // tooltip
 const tip = $("#tip");
 function showTip(html, ev) { tip.innerHTML = html; tip.style.display = "block"; moveTip(ev); }
+function escapeHtml(value) {
+  const node = document.createElement("span");
+  node.textContent = String(value ?? "");
+  return node.innerHTML;
+}
 function moveTip(ev) {
   const pad = 12, r = tip.getBoundingClientRect();
   let x = ev.clientX + pad, y = ev.clientY + pad;
@@ -343,13 +350,13 @@ function drawStackBand(sel, partsKey, valKey, fmt, legendBox, chainName) {
       const r = el("rect", { x, y: y2, width: bw, height: Math.max(y1 - y2, 0.4),
         fill: COLORS[names.indexOf(p.model) >= 0 ? names.indexOf(p.model) : p.j % 5],
         rx: 0, "fill-opacity": d.partial ? 0.45 : 0.9 }, svg);
-      bindTip(r, `<b>${d.day}</b><br>${p.model}: ${fmt(p[valKey])}`);
+      bindTip(r, `<b>${d.day}</b><br>${escapeHtml(p.model)}: ${fmt(p[valKey])}`);
       acc += p[valKey];
     });
     if (acc > 0) {
       const hit = el("rect", { x: ml + band * i, y: mt, width: band, height: ph, fill: "transparent" }, svg);
       bindTip(hit, `<b>${d.day}</b>${d.partial ? " · 数据不完整" : ""}<br>合计 <b>${fmt(acc)}</b><br>` +
-        segs.map(p => `${p.model} ${fmt(p[valKey])}`).join("<br>"));
+        segs.map(p => `${escapeHtml(p.model)} ${fmt(p[valKey])}`).join("<br>"));
     }
     if (i % step === 0 || i === n - 1)
       el("text", { x: x + bw / 2, y: mt + ph + 14, "text-anchor": "middle", "font-size": 10, fill: MUTED }, svg).textContent = d.label;
@@ -358,7 +365,7 @@ function drawStackBand(sel, partsKey, valKey, fmt, legendBox, chainName) {
     const box = $(legendBox);
     if (box.dataset[chainName] !== "1") {
       box.insertAdjacentHTML("beforeend", names.map((m, i) =>
-        `<span><i style="background:${COLORS[i % 5]}"></i>${m}</span>`).join(""));
+        `<span><i style="background:${COLORS[i % COLORS.length]}"></i>${escapeHtml(m)}</span>`).join(""));
       box.dataset[chainName] = "1";
     }
   }
@@ -377,7 +384,9 @@ function renderKpis() {
   box.innerHTML = items.map(([v, t]) => `<div class="kpi"><div class="v">${v}</div><div class="k">${t}</div></div>`).join("");
   const gwModels = k.models.filter(m => m.chain === "gateway").length;
   $("#modelSub").textContent = `上带 = WorkBuddy 链($) · 下带 = 网关链(点数, ${gwModels} 个模型)`;
-  $("#meta").innerHTML = `数据范围 ${k.range} (UTC+8) · 截至 <b>${k.max_dt}</b> · 末日(浅色柱)因源库同步滞后可能不完整 · 生成于 ${D.generated}<br>链路: WorkBuddy CLI→CC Switch 代理(计美元) + 各客户端→本地网关 8317(计点数), 两者互不重叠 · 重新生成: <code>python3 ~/.hermes/scripts/usage_charts.py</code>`;
+  $("#meta").textContent = k.requests
+    ? `数据范围 ${k.range} (UTC+8) · 截至 ${k.max_dt} · 生成于 ${D.generated} · 浅色日期的数据可能不完整`
+    : "尚无用量记录。";
 }
 
 // 图1: 每日成本双带 + 请求线(上带右轴) + 两条 MA7 虚线
@@ -491,10 +500,15 @@ def write_json(path, payload):
     doc = dict(payload, summary=summarize(payload))
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, ensure_ascii=False)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=".usage-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, ensure_ascii=False, allow_nan=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
     return path
 
 
@@ -511,12 +525,14 @@ def summarize(p):
         seg = [d for d in days if a <= d["day"] <= b]
         return (round(sum(d[key] for d in seg), 2), sum(d["req"] for d in seg))
 
-    last = datetime.date.fromisoformat(days[-1]["day"])
-    prev_end = (last - datetime.timedelta(days=7)).isoformat()
-    prev_start = (last - datetime.timedelta(days=13)).isoformat()
-    last7 = win((last - datetime.timedelta(days=6)).isoformat(), days[-1]["day"])
-    prev7 = win(prev_start, prev_end)
-    last7c = win((last - datetime.timedelta(days=6)).isoformat(), days[-1]["day"], "credit")
+    last7 = prev7 = last7c = (0, 0)
+    if days:
+        last = datetime.date.fromisoformat(days[-1]["day"])
+        prev_end = (last - datetime.timedelta(days=7)).isoformat()
+        prev_start = (last - datetime.timedelta(days=13)).isoformat()
+        last7 = win((last - datetime.timedelta(days=6)).isoformat(), days[-1]["day"])
+        prev7 = win(prev_start, prev_end)
+        last7c = win((last - datetime.timedelta(days=6)).isoformat(), days[-1]["day"], "credit")
     top_days = sorted(days, key=lambda d: -d["cost"])[:3]
     top_credit_days = sorted(days, key=lambda d: -d["credit"])[:3]
     peak_hour = max(p["hourly"], key=lambda h: h["cost"])
@@ -554,10 +570,11 @@ def main():
     ap.add_argument("--json", dest="json_out", default=None,
                     help="额外输出图表数据 JSON 快照 (供控制台 /api/usage 读取)")
     a = ap.parse_args()
-    db = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True)
-    payload = build_payload(load(db))
+    with closing(sqlite3.connect(Path(a.db).resolve().as_uri() + "?mode=ro", uri=True)) as db, db:
+        db.execute("BEGIN")
+        payload = build_payload(load(db))
     html = HTML.replace("__DATA__", json.dumps(payload, ensure_ascii=False).replace("</", "<\\/"))
-    os.makedirs(os.path.dirname(a.out), exist_ok=True)
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as fh:
         fh.write(html)
     result = {"out": a.out, "summary": summarize(payload)}

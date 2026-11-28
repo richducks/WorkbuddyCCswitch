@@ -39,7 +39,7 @@ INITIAL_PASSWORD_BANNER = (
 PERMISSIONS = {
     ("GET", "summary"): "status",
     ("GET", "usage"): "status",
-    ("POST", "usage/refresh"): "status",
+    ("POST", "usage/refresh"): "usage_refresh",
     ("GET", "session"): "accounts",
     ("GET", "hermes/key"): "keys",
     ("GET", "providers"): "providers",
@@ -105,16 +105,10 @@ def _initialize(appbuilder: AppBuilder, db: SQLA, password: str | None, bind_ip:
         sm.add_permission_role(role, sm.find_permission_view_menu("can_status", VIEW))
 
     pending_id = session.execute(text("SELECT user_id FROM wb_initial_admin LIMIT 1")).scalar()
-    if pending_id is not None:
-        pending_user = sm.get_user_by_id(pending_id) if pending_id else None
-        # 局域网绑定拒绝仍在使用默认密码的安装，倒逼先在本机改密。
-        if bind_ip != "127.0.0.1" and pending_user and check_password_hash(pending_user.password, DEFAULT_INITIAL_PASSWORD):
-            raise RuntimeError("请先在本机修改初始密码，再启用局域网访问")
+    if pending_id == 0:
         return
-    # A persistent installation marker also covers installations whose first
-    # administrator was renamed or deleted after initialization.
-    admin = sm.find_user(username="admin")
-    if admin is None:
+    admin = sm.get_user_by_id(pending_id) if pending_id is not None else sm.find_user(username="admin")
+    if admin is None and pending_id is None:
         # 未提供 bootstrap 密码时回退到默认密码，让本机部署开箱可用；
         # 局域网部署仍要求在 data/web/permissions-bootstrap 写入至少 12 个字符。
         password = (password or "").strip() or DEFAULT_INITIAL_PASSWORD
@@ -128,9 +122,14 @@ def _initialize(appbuilder: AppBuilder, db: SQLA, password: str | None, bind_ip:
                               password=generate_password_hash(password))
         session.add(admin)
         session.flush()
-    # 仅当实际生效的密码是默认值时才挂出"待改密"标记；自定义 bootstrap 密码不需要提醒。
-    if password == DEFAULT_INITIAL_PASSWORD:
-        session.execute(text("INSERT INTO wb_initial_admin (user_id) VALUES (:id)"), {"id": admin.id})
+    is_default = admin is not None and check_password_hash(admin.password, DEFAULT_INITIAL_PASSWORD)
+    if is_default and bind_ip != "127.0.0.1":
+        raise RuntimeError("请先在本机修改初始密码，再启用局域网访问")
+    if pending_id is None:
+        session.execute(text("INSERT INTO wb_initial_admin (user_id) VALUES (:id)"),
+                        {"id": admin.id if is_default else 0})
+    elif not is_default:
+        session.execute(text("UPDATE wb_initial_admin SET user_id = 0 WHERE user_id = :id"), {"id": pending_id})
     session.commit()
 
 
@@ -198,7 +197,21 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
                 db.session.commit()
                 return redirect("/")
         return render_template_string("""
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>修改控制台密码</title>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>修改控制台密码</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0d1117; color: #e6edf3; font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 32rem; margin: 3rem auto; padding: 1.25rem; }
+  h1 { margin: 0 0 1rem; font-size: 1.5rem; }
+  label { display: grid; gap: .35rem; }
+  input, button { min-height: 44px; font: inherit; color: inherit; background: #161b22;
+                  border: 1px solid #8b949e; border-radius: 7px; padding: 6px 12px; }
+  button { cursor: pointer; border-color: #58a6ff; }
+  [role="alert"] { color: #ffa198; }
+  a { color: #79c0ff; }
+</style></head>
 <body><main><h1>修改控制台密码</h1>
 {% if message %}<p role="alert">{{ message }}</p>{% endif %}
 <form method="post">

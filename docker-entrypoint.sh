@@ -6,6 +6,6 @@ WB_UID="$(id -u wb)"
 WB_GID="$(id -g wb)"
 find /data/gateway /data/web -xdev \( -type d -o \( -type f -links 1 \) \) \
   -exec chown -h "${WB_UID}:${WB_GID}" {} + 2>/dev/null || true
-chown "${WB_UID}:${WB_GID}" /data 2>/dev/null || true
-chmod 700 /data/gateway /data/web 2>/dev/null || true
-exec gosu wb python3 /app/app/boot.py "$@"
+chown "${WB_UID}:${WB_GID}" /data
+chmod 700 /data/gateway /data/web
+exec gosu wb "$@"

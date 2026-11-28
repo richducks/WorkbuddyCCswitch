@@ -139,7 +139,8 @@ nav_hrefs = re.findall(r'<a href="#(\w+)"', re.sub(r"<!--.*?-->", "", sidenav, f
 check("web: navigation includes both account pools and all setup pages in order",
       nav_hrefs == ["acctCard", "checkinOnlyCard", "modelsCard", "hermesCard", "bridgeCard", "usageCard", "setupGuideCard"])
 check("web: default tab is the first nav item",
-      "activateTab(navLinks[0])" in page and nav_hrefs[:1] == ["acctCard"])
+      "activateTab(navLinks.find(link => link.hash === location.hash) || navLinks[0])" in page
+      and nav_hrefs[:1] == ["acctCard"])
 
 print(f"\n{len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

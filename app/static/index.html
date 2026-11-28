@@ -12,6 +12,7 @@
     --accent: #58a6ff; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
          font-size: 14px; line-height: 1.55; }
@@ -118,6 +119,11 @@
   .loading { opacity: .5; pointer-events: none; }
   /* 用量复盘模块 */
   .usage-kpis { display: flex; gap: 10px; flex-wrap: wrap; }
+  .usage-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .usage-heading h2 { margin-bottom: 0; }
+  .usage-date { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 6px; }
+  .usage-date select { max-width: 100%; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border);
+                       border-radius: 7px; background: var(--panel); color: var(--fg); font: inherit; }
   .usage-kpi { flex: 1 1 130px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
   .usage-kpi .v { font-size: 20px; font-weight: 600; }
   .usage-kpi .k { font-size: 11px; color: var(--muted); margin-top: 2px; }
@@ -130,8 +136,8 @@
   #usageTip { position: fixed; display: none; z-index: 70; pointer-events: none; background: var(--panel-2);
               border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px;
               color: var(--fg); box-shadow: 0 2px 10px rgba(0,0,0,.35); max-width: 260px; }
-  .usage-detail-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 6px; }
-  @media (max-width: 720px) { .usage-detail-cols { grid-template-columns: 1fr; } }
+  .usage-detail-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+                       gap: 16px; margin-top: 6px; }
   .usage-detail-cap { font-size: 11.5px; color: var(--muted); font-weight: 600; margin: 4px 0 2px; }
   .usage-table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 6px; }
   .usage-table th, .usage-table td { border-top: 1px solid var(--border); padding: 4px 6px; text-align: right; overflow-wrap: anywhere; }
@@ -180,7 +186,8 @@
   }
   @media (max-width: 640px), (pointer: coarse) {
     body { font-size: 15px; }
-    button, .sidenav a, .reserveInput { min-height: 44px; }
+    button, .sidenav a, .reserveInput, .usage-date select { min-height: 44px; }
+    .meta a, .provider-row a { display: inline-flex; align-items: center; min-height: 44px; }
     button { padding: 10px 14px; }
     button.sm { padding: 8px 12px; font-size: 13px; }
     .account-auto-checkin, button.pinBtn { min-width: 44px; min-height: 44px; }
@@ -252,10 +259,9 @@
   <div class="grid">
     <section class="card wide" id="providersCard" hidden>
       <h2>模型提供商</h2>
-      <div class="provider-row"><strong>WorkBuddy Gateway</strong> <span class="file"><a href="#acctCard">内置 · 点此打开账号与签到</a></span></div>
+      <div class="provider-row"><strong>WorkBuddy Gateway</strong> <a href="#acctCard">前往微信账号池</a></div>
       <div id="providerList"><p class="hint">正在读取自定义提供商…</p></div>
       <div class="bar"><button class="primary" type="button" id="addProviderBtn" disabled>＋ 添加提供商</button><button type="button" id="refreshProvidersBtn">刷新列表</button></div>
-      <p class="hint">保存后复制配置命令，到运行 Hermes 的宿主机执行。API Key 不填在这里；若需要鉴权，只填写环境变量名。保存或移除预设不会修改 Hermes 的默认模型或备用链。</p>
       <form class="provider-form" id="providerForm" hidden>
         <label>标识<input name="id" required maxlength="31" pattern="[a-z][a-z0-9\-]{0,30}" placeholder="my-relay" autocomplete="off"></label>
         <label>显示名称<input name="name" required maxlength="64" placeholder="我的中转" autocomplete="off"></label>
@@ -263,6 +269,7 @@
         <label>API 协议<select name="transport"><option value="chat_completions">OpenAI Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option><option value="codex_responses">Responses</option></select></label>
         <label>默认模型 ID<input name="defaultModel" required maxlength="200" placeholder="provider/model" autocomplete="off"></label>
         <label>密钥环境变量（可选）<input name="keyEnv" maxlength="100" pattern="[A-Z_][A-Z0-9_]{0,99}" placeholder="MY_RELAY_API_KEY" autocomplete="off"></label>
+        <p class="hint full">只填变量名，不填密钥。保存后可复制配置命令，不会更改默认模型。</p>
         <label class="full">额外模型 ID（每行一个）<textarea name="models" rows="3" maxlength="20099"></textarea></label>
         <div class="bar full"><button class="primary" type="submit" id="saveProviderBtn">保存提供商</button><button type="button" id="cancelProviderBtn">取消</button></div>
         <p class="hint full" id="providerError" role="status" hidden></p>
@@ -270,6 +277,7 @@
     </section>
     <section class="card wide" id="acctCard">
       <h2>WorkBuddy 微信账号池 <span class="n" id="acctCount"></span></h2>
+      <p class="hint" id="firstAccountHint" hidden>先扫码接入一个 WorkBuddy 账号，再到「Hermes 对接」复制客户端配置。</p>
       <div class="table-wrap account-table">
       <table>
         <thead><tr>
@@ -372,45 +380,51 @@
       </div>
     </section>
     <section class="card wide" id="usageCard" hidden>
-      <h2>用量复盘 <span class="n" id="usageMeta"></span>
-        <button class="sm" id="usageRefreshBtn" hidden>刷新数据</button>
-        <span class="n" id="usageRefreshInfo"></span></h2>
-      <p class="hint" id="usageUnavailable" hidden></p>
+      <div class="usage-heading">
+        <h2>用量复盘 <span class="n" id="usageMeta"></span></h2>
+        <button type="button" id="usageRefreshBtn" disabled hidden>刷新数据</button>
+      </div>
+      <p class="hint" id="usageRefreshInfo" role="status" hidden></p>
+      <p class="hint" id="usageUnavailable" role="status" hidden></p>
       <div id="usageBody" hidden>
         <div class="usage-kpis" id="usageKpis"></div>
         <div class="usage-block"><h3>每日成本与请求量</h3>
-          <div class="usage-sub">上带 = WorkBuddy 链成本（$，蓝柱）+ 虚线 7 日均线 + 橙线请求次数（右轴） · 下带 = 网关链用量（点数，紫柱） · 两条链单位不同，分开统计不混算 · 末日浅色柱因源库同步滞后可能不完整 · <b>点击柱子查看当天分时段与模型明细</b></div>
+          <div class="usage-sub">橙线：请求次数 · 虚线：7 日平均 · 浅色柱：数据可能不完整</div>
+          <label class="usage-date">日期明细 <select id="usageDay" aria-controls="usageDetail"></select></label>
+          <div class="usage-detail-cap" id="dailyUsdLabel">CC Switch（美元）</div>
           <div class="usage-chart" id="chDaily"></div>
+          <div class="usage-detail-cap" id="dailyCreditLabel">WorkBuddy 网关（点数）</div>
           <div class="usage-chart" id="chDailyG"></div></div>
         <div class="usage-block" id="usageDetail" hidden>
-          <h3 id="detailTitle">当日明细</h3>
-          <div class="usage-sub" id="detailSub"></div>
+          <div class="usage-heading"><h3 id="detailTitle">当日明细</h3>
+            <button type="button" class="sm" id="usageDetailClose">收起明细</button>
+          </div>
+          <p class="usage-sub" id="detailSub" hidden></p>
           <div class="usage-detail-cols">
-            <div>
-              <div class="usage-detail-cap">WorkBuddy 链（美元）</div>
+            <div id="detailUsd">
+              <div class="usage-detail-cap">CC Switch（美元）</div>
               <div class="usage-chart" id="chDetailC"></div>
               <table class="usage-table" id="tbDetailC"></table>
             </div>
-            <div>
-              <div class="usage-detail-cap">网关链（点数）</div>
+            <div id="detailCredit">
+              <div class="usage-detail-cap">WorkBuddy 网关（点数）</div>
               <div class="usage-chart" id="chDetailG"></div>
               <table class="usage-table" id="tbDetailG"></table>
             </div>
           </div></div>
         <div class="usage-block"><h3>每日成本按模型构成</h3>
-          <div class="usage-sub" id="modelSub"></div>
           <div class="usage-legend" id="modelLegend"></div>
           <div class="usage-chart" id="chModel"></div>
           <div class="usage-chart" id="chModelG"></div></div>
         <div class="usage-block"><h3>时段分布（全程汇总）</h3>
-          <div class="usage-sub">上带 = WorkBuddy 链成本（$）+ 橙线请求次数（右轴） · 下带 = 网关链用量（点数）— 看一天里什么时段最烧</div>
+          <div class="usage-sub">按北京时间统计；橙线为请求次数</div>
           <div class="usage-chart" id="chHour"></div>
           <div class="usage-chart" id="chHourG"></div></div>
         <div class="usage-block"><h3>星期 × 时段热力图</h3>
-          <div class="usage-sub">颜色 = 请求次数热度（两链合计） · 悬停看次数与两种成本</div>
+          <div class="usage-sub">颜色越深，请求越多</div>
           <div class="usage-chart" id="chHeat"></div></div>
         <div class="usage-block"><h3>缓存命中率（按天）</h3>
-          <div class="usage-sub">缓存读 tokens ÷（缓存读 + 未缓存输入） — 越高越省，掉下去通常是长间隔后冷启动</div>
+          <div class="usage-sub">缓存读取占全部输入 Token 的比例</div>
           <div class="usage-chart" id="chCache"></div></div>
         <p class="hint" id="usageFootnote"></p>
       </div>
@@ -481,7 +495,7 @@ curl -i https://api.example.com/api/summary</code></pre>
 </div>
 
 <div class="modal-bg" id="modalBg">
-  <div class="modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
     <h3 id="loginTitle">添加微信账号</h3>
     <div id="loginArea">
       <div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div>
@@ -501,6 +515,7 @@ let summary = null;
 let pollTimer = null;
 let loginGeneration = 0;
 let loginRequest = null;
+let loginTrigger = null;
 let checkinBusy = false;
 const autoSettingsBusy = new Set();
 let loadFailed = false;
@@ -564,8 +579,8 @@ function renderAccounts(accounts, id, autoDefault, canChangeAuto, canManageAccou
   $(`#${id}Count`).textContent = `共 ${accounts.length} 个`;
   const body = $(`#${id}Body`);
   if (!accounts.length) {
-    const action = id === 'acct' ? '添加微信账号' : '添加代签到账号';
-    body.innerHTML = `<tr><td colspan="${id === 'acct' ? 8 : 6}" class="empty">尚无账号，点击「${action}」扫码接入。${id === 'checkinOnly' ? '也可从「微信账号池」移入。' : ''}</td></tr>`;
+    const hint = id === 'checkinOnly' && canManageAccounts ? '可扫码添加，或从微信账号池移入。' : '';
+    body.innerHTML = `<tr><td colspan="${id === 'acct' ? 8 : 6}" class="empty">尚无已接入账号。${hint}</td></tr>`;
     return;
   }
   if (id === 'acct') accounts = [...accounts].sort((a, b) => (a.pinRank || Infinity) - (b.pinRank || Infinity));
@@ -649,6 +664,8 @@ function render(d) {
   const permissions = d.permissions;
   $('#permissionsLink').hidden = !permissions?.admin;
   $('#logoutLink').hidden = !permissions;
+  $('#usageRefreshBtn').hidden = !permissions?.usage_refresh;
+  $('#firstAccountHint').hidden = !permissions?.accounts || d.accounts.some(a => !a.checkinOnly);
   for (const id of ['addBtn', 'addCheckinOnlyBtn']) $(`#${id}`).hidden = permissions?.accounts === false;
   $('#copyKeyBtn').hidden = permissions?.keys === false;
   $('#checkinAllBtn').hidden = permissions?.checkin === false;
@@ -940,10 +957,12 @@ function setLoginTitle(checkinOnly) {
   $('#loginTitle').textContent = checkinOnly ? '添加代签到账号' : '添加微信账号';
 }
 
-function resetLoginArea(checkinOnly) {
+function resetLoginArea(checkinOnly, feedback = '') {
   setLoginTitle(checkinOnly);
   $('#loginArea').innerHTML =
-    '<div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div><div class="empty">点击上方按钮开始。二维码与登录链接只会显示在本地页面。</div>';
+    '<div class="bar" style="margin-top:0"><button class="primary" id="startLoginBtn">生成登录二维码</button></div><p class="hint" id="loginFeedback" role="status" hidden></p>';
+  $('#loginFeedback').textContent = feedback;
+  $('#loginFeedback').hidden = !feedback;
   $('#startLoginBtn').onclick = () => startLogin(checkinOnly);
 }
 
@@ -1088,23 +1107,28 @@ async function startLogin(checkinOnly) {
     const s = await loginRequest;
     if (generation === loginGeneration) showLoginProgress(s.sessionId, s.file, generation, checkinOnly);
   } catch (e) {
-    if (generation === loginGeneration) { toast('无法开始登录：' + e.message, true); resetLoginArea(checkinOnly); }
+    if (generation === loginGeneration) resetLoginArea(checkinOnly, '无法生成二维码：' + e.message);
   } finally { loginRequest = null; }
 }
 
-async function openLogin(checkinOnly) {
+async function openLogin(checkinOnly, trigger) {
+  loginTrigger = trigger;
   setLoginTitle(checkinOnly);
   const generation = ++loginGeneration;
   clearTimeout(pollTimer);
   $('#modalBg').style.display = 'flex';
-  $('#loginArea').textContent = '正在查询登录状态…';
+  $('#closeModalBtn').focus({preventScroll: true});
+  $('#loginArea').textContent = '正在准备二维码…';
   if (loginRequest) await loginRequest.catch(() => {});
   try {
     const current = await api('/api/summary');
     if (generation !== loginGeneration) return;
     const sess = current.sessions?.find(x => x.status === 'waiting');
     if (sess) showLoginProgress(sess.sessionId, sess.file, generation, checkinOnly, sess.checkinOnly);
-    else resetLoginArea(checkinOnly);
+    else {
+      resetLoginArea(checkinOnly);
+      await startLogin(checkinOnly);
+    }
   } catch (e) {
     if (generation !== loginGeneration) return;
     $('#loginArea').textContent = '无法查询登录状态，请关闭后重试。';
@@ -1116,11 +1140,15 @@ $('#closeModalBtn').onclick = () => {
   clearTimeout(pollTimer);
   $('#modalBg').style.display = 'none';
   $('#loginArea').replaceChildren();
+  loginTrigger?.focus();
 };
 $('#modalBg').onclick = (e) => { if (e.target === $('#modalBg')) $('#closeModalBtn').click(); };
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('#modalBg').style.display === 'flex') $('#closeModalBtn').click();
+});
 $('#refreshBtn').onclick = () => load(true);
-$('#addBtn').onclick = () => openLogin(false);
-$('#addCheckinOnlyBtn').onclick = () => openLogin(true);
+$('#addBtn').onclick = e => openLogin(false, e.currentTarget);
+$('#addCheckinOnlyBtn').onclick = e => openLogin(true, e.currentTarget);
 $('#refreshCheckinOnlyBtn').onclick = () => load(true);
 $('#checkinAllBtn').onclick = doBatchCheckin;
 $('#copyProviderBtn').onclick = () => copy(JSON.stringify(summary?.hermes.providerEntry, null, 2), 'provider JSON 已复制');
@@ -1140,6 +1168,7 @@ function activateTab(link) {
     else x.removeAttribute('aria-current');
   });
   navSections.forEach(s => { s.hidden = s !== target; });
+  document.dispatchEvent(new CustomEvent('wb:tab', {detail: target.id}));
 }
 navLinks.forEach(a => a.addEventListener('click', e => { e.preventDefault(); activateTab(a); }));
 // 卡片内跳转链接（如“账号与签到见下方”）改为切换标签页
@@ -1147,7 +1176,7 @@ document.querySelectorAll('section a[href^="#"]').forEach(a => a.addEventListene
   const link = navLinks.find(x => x.getAttribute('href') === a.getAttribute('href'));
   if (link) { e.preventDefault(); activateTab(link); }
 }));
-if (navLinks.length) activateTab(navLinks[0]);
+if (navLinks.length) activateTab(navLinks.find(link => link.hash === location.hash) || navLinks[0]);
 
 load();
 setInterval(load, 15000);

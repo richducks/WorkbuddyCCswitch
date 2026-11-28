@@ -1,27 +1,25 @@
-// 用量复盘：从 /api/usage 读取聚合快照（宿主机 ETL / 控制台「刷新数据」按钮生成），
-// 数据口径集中在 usage_charts.py，这里只做渲染（移植自其本地看板模板）。
-// 首次进入标签页时拉取；「刷新数据」会先 POST /api/usage/refresh 触发容器内重跑 ETL，
-// 再渲染返回的最新快照（比只重读静态 JSON 能看到当天新请求）。
-//
-// v2 双链口径（成本单位不同，不混算，按带展示）：
-//   - codex 链（WorkBuddy CLI → CC Switch 代理）：成本 = 美元
-//   - gateway 链（各客户端 → 本地网关 8317 /v1）：成本 = credits 点数
-// 请求次数 / token / 缓存命中率 / 时段热度 = 两链合并；wh.rows = [次数, 美元, 点数]。
-// 穿透：点击图1的日期柱 → 当天分时段柱（按链）+ 按模型明细表（day_detail）。
+// Render the usage snapshot. The backend keeps CC Switch USD and gateway credits separate.
 (() => {
   const NS = "http://www.w3.org/2000/svg";
   const COLORS = ["#58a6ff", "#f28e2b", "#3fb950", "#bc8cff", "#e3b341"];
   const ACC = COLORS[0], C2 = COLORS[1], C3 = COLORS[2], C4 = COLORS[3];
   const MUTED = "#8b949e", GRID = "#30363d", FG = "#e6edf3";
   const $ = (s) => document.querySelector(s);
-  const fmtMoney = (v) => v == null ? "—" : "$" + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
-  const fmtCredit = (v) => v == null || !v ? "—" : (v >= 1000 ? v.toFixed(0) : v.toFixed(1)) + " 点";
+  const fmtMoney = (v) => v == null ? "—" : "$" + v.toFixed(v > 0 && v < 0.01 ? 4 : 2);
+  const fmtCredit = (v) => v == null ? "—" : fmtInt(v) + " 点";
   const fmtInt = (v) => (v == null ? "—" : v.toLocaleString("en-US"));
   let D = null;
   let loaded = false;
   let loading = false;
   let selDay = null; // 当前穿透展示的日期（图1柱点击）
   const tip = $("#usageTip");
+  const card = $("#usageCard");
+  const picker = $("#usageDay");
+  const refreshBtn = $("#usageRefreshBtn");
+  const feedback = $("#usageRefreshInfo");
+  const empty = $("#usageUnavailable");
+  const hasUsd = () => (D.kpi.codex_requests ?? (D.kpi.cost != null)) > 0;
+  const hasCredits = () => (D.kpi.gateway_requests ?? (D.kpi.credit != null)) > 0;
 
   function el(tag, attrs, parent) {
     const e = document.createElementNS(NS, tag);
@@ -51,7 +49,7 @@
   function frame(sel, h, mr) {
     const box = $(sel);
     box.textContent = "";
-    const w = Math.max(box.clientWidth || 0, 320);
+    const w = Math.max(box.clientWidth || 0, 220);
     const svg = el("svg", { viewBox: `0 0 ${w} ${h}`, height: h }, box);
     const ml = 44, mt = 10, mb = 22;
     return { svg, w, h, ml, mr: mr || 10, mt, mb, pw: w - ml - (mr || 10), ph: h - mt - mb };
@@ -66,13 +64,10 @@
   // KPI 卡片 + 页脚口径说明
   function renderKpis() {
     const k = D.kpi, box = $("#usageKpis");
-    const items = [
-      [fmtMoney(k.cost), "总成本 · WorkBuddy 链 ($)"],
-      [fmtCredit(k.credit), "网关链消耗（点数）"],
-      [fmtInt(k.requests), "请求次数（两链）"],
-      [k.cache_rate == null ? "—" : k.cache_rate + "%", "缓存命中率（两链）"],
-      [k.codex_requests ? fmtMoney(k.cost / k.codex_requests) : "—", "WorkBuddy 均价 / 请求"],
-    ];
+    const items = [[fmtInt(k.requests), "请求次数"]];
+    if (hasCredits()) items.push([fmtCredit(k.credit), "WorkBuddy 网关消耗"]);
+    if (hasUsd()) items.push([fmtMoney(k.cost), "CC Switch 成本"]);
+    if (k.cache_rate != null) items.push([k.cache_rate + "%", "缓存命中率"]);
     box.textContent = "";
     for (const [v, t] of items) {
       const div = document.createElement("div");
@@ -82,11 +77,9 @@
       div.append(val, cap);
       box.appendChild(div);
     }
-    $("#usageMeta").textContent = `截至 ${k.max_dt}`;
+    $("#usageMeta").textContent = k.max_dt ? `截至 ${k.max_dt}` : "";
     $("#usageFootnote").textContent =
-      `数据范围 ${k.range}（北京时间）· 末日浅色柱因源库同步滞后可能不完整 · 快照生成于 ${D.generated} · ` +
-      "链路：WorkBuddy CLI→CC Switch 代理（计美元）+ 各客户端→本地网关 8317（计点数），两者互不重叠 · " +
-      "宿主机每日 03:00 ETL 自动刷新，点右上角「刷新数据」可立即重跑统计（新增请求也会纳入）";
+      `${k.range}（北京时间）· 上次统计：${D.generated}`;
   }
   // 通用日柱带：一根柱/天 + 可选请求线（右轴）+ 可选 MA7 虚线
   function drawDailyBand(sel, valKey, fmt, barColor, opts) {
@@ -114,7 +107,7 @@
         const bar = el("rect", { x, y: yV(v), width: bw, height: Math.max(y0 - yV(v), 0.5),
                                  fill: barColor, rx: 1.5, "fill-opacity": d.partial ? 0.4 : 0.85,
                                  stroke: sel ? FG : "none", "stroke-width": sel ? 1.2 : 0 }, svg);
-        bindTip(bar, `<b>${d.day}</b>${d.partial ? " · 数据不完整" : ""}${sel ? " · 已选中" : ""}<br>${opts.name} <b>${fmt(v)}</b>`);
+        bindTip(bar, `<b>${esc(d.day)}</b>${d.partial ? " · 数据不完整" : ""}${sel ? " · 已选中" : ""}<br>${opts.name} <b>${fmt(v)}</b>`);
       }
       if (i % step === 0 || i === n - 1)
         el("text", { x: x + bw / 2, y: mt + ph + 14, "text-anchor": "middle", "font-size": 10, fill: sel ? FG : MUTED }, svg).textContent = d.label;
@@ -126,16 +119,15 @@
     // 悬停列：一条列出两链，免得来回对上下带；点击穿透到当天明细
     days.forEach((d, i) => {
       const hit = el("rect", { x: ml + band * i, y: mt, width: band, height: ph, fill: "transparent" }, svg);
-      if (opts.clickable) hit.style.cursor = "pointer";
-      bindTip(hit, `<b>${d.day}</b>${d.partial ? " · 数据不完整" : ""}<br>WorkBuddy <b>${fmtMoney(d.cost)}</b> · 网关 <b>${fmtCredit(d.credit)}</b><br>${fmtInt(d.req)} 次` +
-        (opts.clickable ? `<br><span style="color:${ACC}">点击查看当天分时段明细</span>` : ""));
-      if (opts.clickable) hit.addEventListener("click", () => toggleDetail(d.day));
+      if (d.req) hit.style.cursor = "pointer";
+      bindTip(hit, `<b>${esc(d.day)}</b>${d.partial ? " · 数据不完整" : ""}<br>CC Switch <b>${fmtMoney(d.cost)}</b> · 网关 <b>${fmtCredit(d.credit)}</b><br>${fmtInt(d.req)} 次`);
+      if (d.req) hit.addEventListener("click", () => selectDay(selDay === d.day ? "" : d.day));
     });
   }
   // 通用堆叠柱带：按链取各自的 parts 数组与单位
   function drawStackBand(sel, partsKey, valKey, fmt, chainName) {
     const days = D.days, H = 200;
-    const names = D.kpi.models.filter((m) => m.chain === chainName).map((m) => m.model);
+    const names = (D.kpi.models || []).filter((m) => m.chain === chainName).map((m) => m.model);
     const f = frame(sel, H), { svg, ml, mt, pw, ph } = f;
     const maxV = niceMax(Math.max(...days.map((d) => d[valKey]), 0.1));
     const yV = (v) => mt + ph - (v / maxV) * ph;
@@ -152,13 +144,13 @@
         const ci = names.indexOf(p.model) >= 0 ? names.indexOf(p.model) : p.j % 5;
         const r = el("rect", { x, y: y2, width: bw, height: Math.max(y1 - y2, 0.4), fill: COLORS[ci % 5],
                                "fill-opacity": d.partial ? 0.45 : 0.9 }, svg);
-        bindTip(r, `<b>${d.day}</b><br>${p.model}: ${fmt(p[valKey])}`);
+        bindTip(r, `<b>${esc(d.day)}</b><br>${esc(p.model)}: ${fmt(p[valKey])}`);
         acc += p[valKey];
       });
       if (acc > 0) {
         const hit = el("rect", { x: ml + band * i, y: mt, width: band, height: ph, fill: "transparent" }, svg);
-        bindTip(hit, `<b>${d.day}</b>${d.partial ? " · 数据不完整" : ""}<br>合计 <b>${fmt(acc)}</b><br>` +
-          segs.map((p) => `${p.model} ${fmt(p[valKey])}`).join("<br>"));
+        bindTip(hit, `<b>${esc(d.day)}</b>${d.partial ? " · 数据不完整" : ""}<br>合计 <b>${fmt(acc)}</b><br>` +
+          segs.map((p) => `${esc(p.model)} ${fmt(p[valKey])}`).join("<br>"));
       }
       if (i % step === 0 || i === n - 1)
         el("text", { x: x + bw / 2, y: mt + ph + 14, "text-anchor": "middle", "font-size": 10, fill: MUTED }, svg).textContent = d.label;
@@ -166,20 +158,20 @@
   }
   // 图1: 每日成本双带 + 请求线（上带右轴）+ 两条 MA7 虚线；点击柱穿透
   function renderDaily() {
-    drawDailyBand("#chDaily", "cost", fmtMoney, ACC, { reqLine: true, maKey: "ma7", name: "WorkBuddy 链", clickable: true });
-    drawDailyBand("#chDailyG", "credit", fmtCredit, C4, { reqLine: false, maKey: "ma7g", name: "网关链", clickable: true });
+    const usd = hasUsd(), credits = hasCredits();
+    $("#dailyUsdLabel").hidden = $("#chDaily").hidden = !usd;
+    $("#dailyCreditLabel").hidden = $("#chDailyG").hidden = !credits;
+    if (usd) drawDailyBand("#chDaily", "cost", fmtMoney, ACC, { reqLine: true, maKey: "ma7", name: "CC Switch" });
+    if (credits) drawDailyBand("#chDailyG", "credit", fmtCredit, C4, { reqLine: !usd, maKey: "ma7g", name: "网关" });
   }
   // ---- 穿透：当天分时段柱 + 按模型明细表（数据来自快照 day_detail） ----
   const WD_ZH = ["日", "一", "二", "三", "四", "五", "六"];
-  function toggleDetail(day) {
-    if (selDay === day && !$("#usageDetail").hidden) {
-      selDay = null;
-      $("#usageDetail").hidden = true;
-    } else {
-      selDay = day;
-      $("#usageDetail").hidden = false;
-    }
-    renderDaily(); // 重新画以更新选中高亮
+  function selectDay(day) {
+    selDay = day || null;
+    picker.value = day;
+    $("#usageDetail").hidden = !selDay;
+    tip.style.display = "none";
+    renderDaily();
     if (selDay) drawDetail(selDay);
   }
   // 单链分时柱：hours = [[时, 本单位成本, 次数], ...]（稀疏）
@@ -227,25 +219,28 @@
     const det = (D.day_detail || {})[day];
     const dt = new Date(day + "T12:00:00+08:00");
     $("#detailTitle").textContent = `${day.slice(5)}（周${WD_ZH[dt.getUTCDay()]}）分时段与模型明细 · 北京时间`;
-    $("#detailSub").textContent = "左列 = WorkBuddy 链（美元）· 右列 = 网关链（点数）· 两链单位不同分开统计 · 点击其他日期柱切换，再点同日柱或「收起」关闭";
-    if (!det) {
-      drawDetailHour("#chDetailC", [], fmtMoney, ACC);
-      drawDetailHour("#chDetailG", [], fmtCredit, C4);
-      fillDetailTable("#tbDetailC", null, fmtMoney);
-      fillDetailTable("#tbDetailG", null, fmtCredit);
-      return;
+    $("#detailSub").textContent = "这份快照没有当日明细，请刷新数据。";
+    const usd = Boolean(det?.models?.codex?.length);
+    const credits = Boolean(det?.models?.gateway?.length);
+    $("#detailSub").hidden = usd || credits;
+    $("#detailUsd").hidden = !usd;
+    $("#detailCredit").hidden = !credits;
+    if (usd) {
+      drawDetailHour("#chDetailC", det.hours?.codex, fmtMoney, ACC);
+      fillDetailTable("#tbDetailC", det.models.codex, fmtMoney);
     }
-    drawDetailHour("#chDetailC", det.hours.codex, fmtMoney, ACC);
-    drawDetailHour("#chDetailG", det.hours.gateway, fmtCredit, C4);
-    fillDetailTable("#tbDetailC", det.models.codex, fmtMoney);
-    fillDetailTable("#tbDetailG", det.models.gateway, fmtCredit);
+    if (credits) {
+      drawDetailHour("#chDetailG", det.hours?.gateway, fmtCredit, C4);
+      fillDetailTable("#tbDetailG", det.models.gateway, fmtCredit);
+    }
   }
   // 图2: 模型堆叠双带，图例按链分组
   function renderModel() {
     const lg = $("#modelLegend");
+    const models = D.kpi.models || [];
     lg.textContent = "";
-    for (const [chain, label] of [["codex", "WorkBuddy 链 ($)"], ["gateway", "网关链（点数）"]]) {
-      const names = D.kpi.models.filter((m) => m.chain === chain).map((m) => m.model);
+    for (const [chain, label] of [["codex", "CC Switch（美元）"], ["gateway", "WorkBuddy 网关（点数）"]]) {
+      const names = models.filter((m) => m.chain === chain).map((m) => m.model);
       if (!names.length) continue;
       const tag = document.createElement("b");
       tag.textContent = label + "：";
@@ -258,11 +253,10 @@
         lg.appendChild(span);
       });
     }
-    const gwN = D.kpi.models.filter((m) => m.chain === "gateway").length;
-    $("#modelSub").textContent =
-      `上带 = WorkBuddy 链（$） · 下带 = 网关链（点数${gwN ? `，${gwN} 个模型` : ""}） · 各链内按每日本单位成本堆叠`;
-    drawStackBand("#chModel", "parts", "cost", fmtMoney, "codex");
-    drawStackBand("#chModelG", "credit_parts", "credit", fmtCredit, "gateway");
+    $("#chModel").hidden = !hasUsd();
+    $("#chModelG").hidden = !hasCredits();
+    if (hasUsd()) drawStackBand("#chModel", "parts", "cost", fmtMoney, "codex");
+    if (hasCredits()) drawStackBand("#chModelG", "credit_parts", "credit", fmtCredit, "gateway");
   }
   // 图3: 时段分布双带
   function renderHour() {
@@ -286,18 +280,20 @@
         const x = ml + (pw / 24) * i + (pw / 24 - bw) / 2;
         if (h[valKey] > 0) {
           const r = el("rect", { x, y: yV(h[valKey]), width: bw, height: mt + ph - yV(h[valKey]), fill: color, rx: 1.5, "fill-opacity": 0.85 }, svg);
-          bindTip(r, `<b>${String(h.hour).padStart(2, "0")}:00–${String(h.hour).padStart(2, "0")}:59</b><br>WorkBuddy <b>${fmtMoney(h.cost)}</b> · 网关 <b>${fmtCredit(h.credit)}</b> · ${fmtInt(h.req)} 次`);
+          bindTip(r, `<b>${String(h.hour).padStart(2, "0")}:00–${String(h.hour).padStart(2, "0")}:59</b><br>CC Switch <b>${fmtMoney(h.cost)}</b> · 网关 <b>${fmtCredit(h.credit)}</b> · ${fmtInt(h.req)} 次`);
         }
         if (i % 2 === 0)
           el("text", { x: x + bw / 2, y: mt + ph + 14, "text-anchor": "middle", "font-size": 10, fill: MUTED }, svg).textContent = String(h.hour).padStart(2, "0");
       });
       hs.forEach((h, i) => {
         const hit = el("rect", { x: ml + (pw / 24) * i, y: mt, width: pw / 24, height: ph, fill: "transparent" }, svg);
-        bindTip(hit, `<b>${String(h.hour).padStart(2, "0")}:00 时段（全程）</b><br>WorkBuddy <b>${fmtMoney(h.cost)}</b> · 网关 <b>${fmtCredit(h.credit)}</b><br>${fmtInt(h.req)} 次`);
+        bindTip(hit, `<b>${String(h.hour).padStart(2, "0")}:00 时段（全程）</b><br>CC Switch <b>${fmtMoney(h.cost)}</b> · 网关 <b>${fmtCredit(h.credit)}</b><br>${fmtInt(h.req)} 次`);
       });
     }
-    band("#chHour", "cost", fmtMoney, ACC, true);
-    band("#chHourG", "credit", fmtCredit, C4, false);
+    $("#chHour").hidden = !hasUsd();
+    $("#chHourG").hidden = !hasCredits();
+    if (hasUsd()) band("#chHour", "cost", fmtMoney, ACC, true);
+    if (hasCredits()) band("#chHourG", "credit", fmtCredit, C4, !hasUsd());
   }
   // 图4: 星期×时段热力图（颜色=请求次数，两链成本单位不同不能混着上色；rows=[次数,美元,点数]）
   function renderHeat() {
@@ -317,7 +313,7 @@
         const c = el("rect", { x: ml + cw * hi + 1, y: y + 1.5, width: cw - 2, height: ch - 3,
                                fill: ACC, rx: 2.5, "fill-opacity": v > 0 ? 0.1 + 0.9 * t : 0.05,
                                stroke: v > 0 ? "none" : GRID, "stroke-width": 0.5 }, svg);
-        bindTip(c, `<b>${r.wd} ${String(hi).padStart(2, "0")}:00–${String(hi).padStart(2, "0")}:59</b><br><b>${fmtInt(v)}</b> 次<br>WorkBuddy ${fmtMoney(r.rows[1][hi])} · 网关 ${fmtCredit(r.rows[2][hi])}`);
+      bindTip(c, `<b>${esc(r.wd)} ${String(hi).padStart(2, "0")}:00–${String(hi).padStart(2, "0")}:59</b><br><b>${fmtInt(v)}</b> 次<br>CC Switch ${fmtMoney(r.rows[1][hi])} · 网关 ${fmtCredit(r.rows[2][hi])}`);
       });
     });
     el("line", { x1: ml, x2: ml + pw, y1: mt + ph, y2: mt + ph, stroke: GRID, "stroke-width": 1 }, svg);
@@ -340,7 +336,7 @@
       const cx = ml + band * i + band / 2, cy = y(d.cache_rate);
       const dot = el("circle", { cx, cy, r: 3, fill: C3, "fill-opacity": 0 }, svg);
       const hit = el("rect", { x: ml + band * i, y: mt, width: band, height: ph, fill: "transparent" }, svg);
-      bindTip(hit, `<b>${d.day}</b><br>缓存命中率 <b>${d.cache_rate}%</b>`);
+      bindTip(hit, `<b>${esc(d.day)}</b><br>缓存命中率 <b>${fmtInt(d.cache_rate)}%</b>`);
       dot.addEventListener("mouseenter", () => dot.setAttribute("fill-opacity", 1));
       dot.addEventListener("mouseleave", () => dot.setAttribute("fill-opacity", 0));
       if (i % step === 0 || i === n - 1)
@@ -351,67 +347,71 @@
     renderKpis(); renderDaily(); renderModel(); renderHour(); renderHeat(); renderCache();
     if (selDay && !$("#usageDetail").hidden) drawDetail(selDay); // resize 后重画穿透图
   }
-  // 刷新：runEtl=true 时先触发容器内重跑 ETL（能看到当天新请求），失败则保留旧图并提示
+  function announce(message) {
+    feedback.textContent = message;
+    feedback.hidden = !message;
+  }
+
   async function refresh(runEtl) {
-    if (loading) return;
+    if (loading || (runEtl && !summary?.permissions?.usage_refresh)) return;
     loading = true;
-    const btn = $("#usageRefreshBtn"), info = $("#usageRefreshInfo");
-    if (btn) { btn.disabled = true; btn.textContent = runEtl ? "重新统计中…" : "加载中…"; }
-    if (info) info.textContent = runEtl ? "正在重跑 ETL（读源库 → 汇账本副本 → 写快照），约几秒…" : "";
+    refreshBtn.disabled = true;
+    if (runEtl) refreshBtn.textContent = "统计中…";
+    announce(runEtl ? "正在统计用量…" : "正在读取用量…");
     try {
-      let doc;
-      let s = {};  // ETL 摘要 (new_rows/total_requests), runEtl 时填充
-      if (runEtl) {
-        doc = await post("/api/usage/refresh", {});
-        if (!doc.ok) {
-          if (info) info.textContent = "刷新失败：" + (doc.error || "未知错误") + "（仍显示上一次数据）";
-          return;
-        }
-        if (doc.snapshotError) {
-          if (info) info.textContent = "刷新完成，但快照异常：" + doc.snapshotError;
-          return;
-        }
-        s = doc.summary || {};  // 先取摘要, 下面 doc 会被快照覆盖
-        doc = doc.snapshot;
-      } else {
-        doc = await api("/api/usage");
-      }
-      if (!doc.available) {
-        $("#usageUnavailable").textContent = doc.hint || "用量数据尚未生成。";
-        $("#usageUnavailable").hidden = false;
+      const result = runEtl ? await post("/api/usage/refresh", {}) : await api("/api/usage");
+      if (runEtl && !result.ok) throw new Error(result.error || "没有生成新的用量数据");
+      const doc = runEtl ? result.snapshot : result;
+      if (!doc?.available || !doc.payload?.kpi?.requests) {
+        D = null;
+        $("#usageMeta").textContent = "";
+        empty.textContent = doc?.available
+          ? "暂无用量记录。通过网关发出请求后，可回来刷新查看。"
+          : doc?.hint || "尚未生成用量数据。";
+        empty.hidden = false;
         $("#usageBody").hidden = true;
-        if (btn) btn.hidden = true;
-        return;
+      } else {
+        D = doc.payload;
+        const days = D.days.filter(day => day.req).map(day => day.day).reverse();
+        picker.replaceChildren(new Option("选择日期", ""), ...days.map(day => new Option(day, day)));
+        if (!days.includes(selDay)) selDay = null;
+        picker.value = selDay || "";
+        $("#usageDetail").hidden = !selDay;
+        empty.hidden = true;
+        $("#usageBody").hidden = false;
+        renderAll();
       }
-      D = doc.payload;
-      $("#usageUnavailable").hidden = true;
-      $("#usageBody").hidden = false;
-      if (btn) btn.hidden = false;
-      renderAll();
-      loaded = true;
-      if (runEtl && info) {
+      if (runEtl) {
+        const s = result.summary;
         const added = (s.new_rows || 0) + (s.gateway_new_rows || 0);
-        info.textContent = `已刷新 · 本次新汇 ${fmtInt(added)} 条 · 合计 ${fmtInt(s.total_requests)} 次`;
+        announce(`已刷新 · 新增 ${fmtInt(added)} 条 · 共 ${fmtInt(s.total_requests)} 次请求`);
+      } else {
+        announce("");
       }
+      loaded = true;
     } catch (e) {
-      if (runEtl && info) info.textContent = "刷新失败：" + e.message + "（仍显示上一次数据）";
-      else {
-        $("#usageUnavailable").textContent = "用量数据读取失败：" + e.message;
-        $("#usageUnavailable").hidden = false;
-      }
+      const prefix = runEtl ? "刷新未完成：" : "无法读取用量：";
+      announce(prefix + e.message + (runEtl && D ? " 仍显示上一次数据。" : ""));
     } finally {
       loading = false;
-      if (btn) { btn.disabled = false; btn.textContent = "刷新数据"; }
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = "刷新数据";
     }
   }
-  const link = document.querySelector('#sidenav a[href="#usageCard"]');
-  if (link) link.addEventListener("click", () => { if (!loaded && !loading) refresh(false); });
-  const refreshBtn = $("#usageRefreshBtn");
-  if (refreshBtn) refreshBtn.onclick = () => refresh(true);
+  picker.onchange = () => selectDay(picker.value);
+  $("#usageDetailClose").onclick = () => { selectDay(""); picker.focus(); };
+  refreshBtn.onclick = () => refresh(true);
+  document.addEventListener("wb:tab", (event) => {
+    if (event.detail !== card.id) return;
+    if (!loaded) refresh(false);
+    else if (D) renderAll();
+  });
+  if (!card.hidden) refresh(false);
   let rt;
   addEventListener("resize", () => {
-    if (!loaded || !D) return;
     clearTimeout(rt);
-    rt = setTimeout(renderAll, 150);
+    if (D && !card.hidden) rt = setTimeout(() => {
+      if (D && !card.hidden) renderAll();
+    }, 150);
   });
 })();

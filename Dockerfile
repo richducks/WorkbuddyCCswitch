@@ -8,7 +8,8 @@ ENV PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
     GW_ROOT=/data/gateway \
     WEB_DATA=/data/web \
-    GW_BIN=/app/bin/workbuddy-gateway
+    GW_BIN=/app/bin/workbuddy-gateway \
+    WB_ETL_SCRIPT=/app/usage_etl/etl_behavior_ledger.py
 
 RUN groupadd -g "${GID}" wb \
  && useradd -u "${UID}" -g "${GID}" -m -s /bin/sh wb \

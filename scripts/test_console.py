@@ -137,12 +137,6 @@ class ConsoleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "令牌文件为空"):
             boot.ensure_token(token)
 
-    def test_existing_blank_token_fails_closed(self):
-        token = self.web / "web.token"
-        token.write_text("\n")
-        with self.assertRaisesRegex(ValueError, "令牌文件为空"):
-            boot.ensure_token(token)
-
     def test_catalog_serves_cache_without_starting_a_second_refresh(self):
         started = threading.Event()
         release = threading.Event()
@@ -276,50 +270,64 @@ class ConsoleTests(unittest.TestCase):
 
     def _fake_etl_env(self, **extra):
         etl = self.root / "etl.py"
-        ledger = self.root / "ledger.db"
         etl.write_text("# fixture ETL\n")
-        ledger.write_bytes(b"SQLite format 3\0")
-        env = {"WB_ETL_SCRIPT": str(etl), "WB_LEDGER_DB": str(ledger),
+        env = {"WB_ETL_SCRIPT": str(etl), "WB_LEDGER_DB": str(self.web / "usage_ledger.db"),
                "CC_SWITCH_DB": str(self.root / "src.db"), **extra}
         return patch.dict(ctrl.os.environ, env)
 
     def test_usage_refresh_runs_container_etl_and_serves_new_snapshot(self):
-        etl = self.root / "etl.py"
-
-        def fake_run(argv, env=None, **kwargs):
-            env = env or {}
-            self.assertEqual(argv[0], "python3")
-            self.assertEqual(argv[1], str(etl))
-            # 只读源库经 os.environ 透传；账本指到临时副本；快照写到挂载目录
-            self.assertEqual(env.get("CC_SWITCH_DB"), "src.db")
-            self.assertNotEqual(env.get("BEHAVIOR_LEDGER_DB"), str(self.root / "ledger.db"))
-            self.assertTrue(env.get("BEHAVIOR_LEDGER_DB", "").startswith("/tmp/usage-etl-"))
-            self.assertEqual(env.get("WB_USAGE_SNAPSHOT"), str(self.web / "usage_snapshot.json"))
-            (self.web / "usage_snapshot.json").write_text(
-                json.dumps({"kpi": {"cost": 9}, "days": [{"day": "2026-11-28"}]})
-            )
-            return SimpleNamespace(returncode=0, stdout='{"new_rows": 12, "gateway_new_rows": 34, "total_requests": 99}\n', stderr="")
-
-        with self._fake_etl_env(CC_SWITCH_DB="src.db"), patch.object(
-            ctrl.subprocess, "run", side_effect=fake_run
-        ):
+        env = {"CC_SWITCH_DB": "",
+               "WB_ETL_SCRIPT": str(Path(__file__).parent / "usage_etl/etl_behavior_ledger.py"),
+               "WB_LEDGER_DB": str(self.web / "usage_ledger.db"), "GW_STATS": str(self.root / "stats.json")}
+        (self.root / "stats.json").write_text(json.dumps({"requests": [
+            {"account": "fixture-account", "at": int(time.time() * 1000),
+             "model": "auto", "resolvedModel": "fixture-model", "credit": 9}
+        ]}))
+        with patch.dict(ctrl.os.environ, env):
             result = self.console.usage_refresh()
+            again = self.console.usage_refresh()
         self.assertTrue(result["ok"])
-        self.assertEqual(result["summary"]["new_rows"], 12)
-        self.assertEqual(result["summary"]["gateway_new_rows"], 34)
-        self.assertEqual(result["snapshot"]["payload"]["kpi"]["cost"], 9)
+        self.assertEqual(result["summary"]["gateway_new_rows"], 1)
+        self.assertEqual(again["summary"]["gateway_new_rows"], 0)
+        self.assertEqual(self.console.usage_snapshot()["payload"]["kpi"]["credit"], 9)
+        host_snapshot = self.web / "usage_snapshot.json"
+        host_snapshot.write_text(json.dumps({"kpi": {"requests": 1, "credit": 2}, "days": []}))
+        self.assertEqual(self.console.usage_snapshot()["payload"]["kpi"]["credit"], 9)
+        self.assertTrue((self.web / "usage_ledger.db").is_file())
         self.assertFalse(self.console._usage_lock.locked())
 
     def test_usage_refresh_failure_keeps_old_snapshot_and_reports_error(self):
         (self.web / "usage_snapshot.json").write_text(json.dumps({"kpi": {"cost": 1}, "days": []}))
-        fail = SimpleNamespace(returncode=1, stdout="", stderr="boom\ntraceback line\n")
-        with self._fake_etl_env(), patch.object(ctrl.subprocess, "run", return_value=fail):
+        for proc in (SimpleNamespace(returncode=1, stdout="", stderr="test error"),
+                     SimpleNamespace(returncode=0, stdout='{"snapshot_error": "disk full"}', stderr=""),
+                     SimpleNamespace(returncode=0, stdout="{}", stderr="")):
+            with self._fake_etl_env(), patch.object(ctrl.subprocess, "run", return_value=proc):
+                result = self.console.usage_refresh()
+            self.assertFalse(result["ok"])
+            self.assertEqual(self.console.usage_snapshot()["payload"]["kpi"]["cost"], 1)
+            self.assertEqual(list(self.web.glob(".usage-*")), [])
+
+    def test_usage_refresh_preserves_history_until_the_old_ledger_is_migrated(self):
+        (self.web / "usage_snapshot.json").write_text(json.dumps({"kpi": {"requests": 8}, "days": []}))
+        with self._fake_etl_env(), patch.object(ctrl.subprocess, "run") as run:
             result = self.console.usage_refresh()
         self.assertFalse(result["ok"])
-        self.assertIn("ETL", result["error"])
-        self.assertIn("traceback line", result["error"])
-        # 旧快照仍可用，前端能继续展示上一次数据
-        self.assertEqual(self.console.usage_snapshot()["payload"]["kpi"]["cost"], 1)
+        self.assertIn("迁移", result["error"])
+        run.assert_not_called()
+
+    def test_usage_refresh_does_not_trade_missing_history_for_new_requests(self):
+        history = {"kpi": {"requests": 1, "codex_requests": 1}, "days": [{"day": "2020-01-01", "req": 1}]}
+        (self.web / "usage_snapshot.json").write_text(json.dumps(history))
+        (self.web / "usage_ledger.db").touch()
+        (self.root / "stats.json").write_text(json.dumps({"requests": [
+            {"account": "fixture-account", "at": int(time.time() * 1000),
+             "model": "fixture-model", "credit": 1}
+        ]}))
+        with patch.dict(ctrl.os.environ, {"CC_SWITCH_DB": ""}):
+            result = self.console.usage_refresh()
+        self.assertFalse(result["ok"])
+        self.assertIn("历史", result["error"])
+        self.assertEqual(self.console.usage_snapshot()["payload"], history)
 
     def test_usage_refresh_is_serialized_by_lock(self):
         release = threading.Event()
@@ -375,7 +383,7 @@ class ConsoleTests(unittest.TestCase):
                     ]
         perm = dict(keys)
         self.assertIn(("POST", "usage/refresh"), perm)
-        self.assertEqual(perm[("POST", "usage/refresh")], "status")
+        self.assertEqual(perm[("POST", "usage/refresh")], "usage_refresh")
 
 
 if __name__ == "__main__":

@@ -10,9 +10,10 @@ import os
 import re
 import secrets
 import shlex
-import shutil
 import stat
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -203,7 +204,12 @@ class Controller:
         self._pins_lock = threading.Lock()
         self.pins_path = ROOT / "pins.json"
         self.provider_registry = ProviderRegistry(WEB_DATA / "providers.json")
-        self.usage_path = WEB_DATA / "usage_snapshot.json"
+        snapshot_override = os.environ.get("WB_USAGE_SNAPSHOT")
+        self.usage_path = Path(snapshot_override) if snapshot_override else WEB_DATA / "usage_console_snapshot.json"
+        # The host ETL can still update its legacy report, but never owns the console snapshot.
+        self._usage_read_paths = (self.usage_path,) if snapshot_override else (
+            self.usage_path, WEB_DATA / "usage_snapshot.json",
+        )
         self._catalog: list[dict] = []
         self._catalog_refresh_at = 0.0
         self._catalog_fetching = False
@@ -380,71 +386,80 @@ class Controller:
         }
 
     # ---------- usage dashboard ----------
-    def usage_snapshot(self) -> dict:
-        """「用量复盘」数据源：宿主机每日 ETL 写入的聚合快照（只读 JSON）。
-
-        快照缺失或损坏时优雅降级为提示文案，控制台其余功能不受影响。"""
-        try:
-            data = json.loads(private_read(self.usage_path))
-        except (OSError, ValueError):
-            return {
-                "available": False,
-                "hint": "尚未生成用量快照。点右上角「刷新数据」可在容器内立即生成（需已挂载源库）；"
-                        "或在宿主机执行 python3 scripts/usage_etl/usage_charts.py --json <仓库>/data/web/usage_snapshot.json，"
-                        "之后每日 03:00 ETL 会自动刷新。",
-            }
+    @staticmethod
+    def _usage_payload(path: Path) -> dict:
+        data = json.loads(private_read(path))
         if not isinstance(data, dict) or not isinstance(data.get("kpi"), dict) or not isinstance(data.get("days"), list):
-            return {"available": False, "hint": "用量快照格式不正确，请在宿主机重新生成。"}
-        return {"available": True, "payload": data}
+            raise ValueError("用量快照格式不正确")
+        if type(data["kpi"].get("requests", 0)) is not int:
+            raise ValueError("用量快照缺少有效的请求数")
+        return data
+
+    def usage_snapshot(self) -> dict:
+        """Read the last successful snapshot without triggering imports."""
+        for path in self._usage_read_paths:
+            try:
+                return {"available": True, "payload": self._usage_payload(path)}
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                return {"available": False, "hint": "暂时无法读取用量数据。请联系管理员重新刷新。"}
+        return {"available": False, "hint": "尚未生成用量数据。管理员可点击「刷新数据」，统计已记录的网关请求。"}
+
+    @staticmethod
+    def _usage_keeps_history(previous: dict, current: dict) -> bool:
+        # A matching total can hide a lost day or an entire data source.
+        def reduced(before, after):
+            return type(before) is int and before > 0 and (type(after) is not int or after < before)
+
+        for key in ("requests", "codex_requests", "gateway_requests"):
+            if reduced(previous["kpi"].get(key), current["kpi"].get(key)):
+                return False
+        per_day = {day["day"]: day.get("req") for day in current["days"]}
+        return not any(reduced(day.get("req"), per_day.get(day.get("day"))) for day in previous["days"]
+                       if isinstance(day, dict))
 
     def usage_refresh(self) -> dict:
-        """点「刷新数据」时在容器内重跑 ETL，把两条链的新流水汇入并重写快照。
-
-        数据流: 只读源库(容器挂载) + 账本副本(临时目录, 只增汇) + stats.json →
-        快照原子写回 /data/web/usage_snapshot.json (bind mount 直达宿主机)。
-        账本正本仍由宿主机每日 03:00 ETL 维护，本方法不写宿主机账本。
-        失败时返回 ok:false 并保留旧快照，控制台继续显示上一份数据。"""
-        etl = Path(os.environ.get("WB_ETL_SCRIPT", "/app/usage_etl/etl_behavior_ledger.py"))
-        ledger = Path(os.environ.get("WB_LEDGER_DB", "/data/ledger/behavior_ledger.db"))
-        snapshot = Path(os.environ.get("WB_USAGE_SNAPSHOT", str(WEB_DATA / "usage_snapshot.json")))
-        if not etl.is_file():
-            return {"ok": False, "error": f"ETL 脚本不存在: {etl}"}
-        if not ledger.is_file():
-            return {"ok": False, "error": f"账本库不可读: {ledger}"}
+        """Increment the local ledger, then publish a validated snapshot atomically."""
         if not self._usage_lock.acquire(blocking=False):
             return {"ok": False, "error": "已有一次刷新正在进行，请稍候再试。"}
         try:
-            workdir = Path(f"/tmp/usage-etl-{secrets.token_hex(4)}")
-            workdir.mkdir(parents=True)
-            try:
-                ledger_copy = workdir / ledger.name
-                shutil.copyfile(ledger, ledger_copy)
-                env = {**os.environ, "BEHAVIOR_LEDGER_DB": str(ledger_copy),
-                       "WB_USAGE_SNAPSHOT": str(snapshot)}
+            default_etl = Path(__file__).resolve().parents[1] / "scripts/usage_etl/etl_behavior_ledger.py"
+            etl = Path(os.environ.get("WB_ETL_SCRIPT", default_etl))
+            ledger = Path(os.environ.get("WB_LEDGER_DB", WEB_DATA / "usage_ledger.db"))
+            cc_export = WEB_DATA / "cc-switch-export.db"
+            previous = self.usage_snapshot().get("payload")
+            if previous and previous["kpi"].get("requests", 0) and not ledger.is_file():
+                return {"ok": False, "error": "已保留旧用量历史。请先按部署文档迁移原账本，再刷新。"}
+            with tempfile.TemporaryDirectory(prefix=".usage-", dir=self.usage_path.parent) as work:
+                candidate = Path(work) / self.usage_path.name
+                env = {**os.environ,
+                       "BEHAVIOR_LEDGER_DB": str(ledger),
+                       "CC_SWITCH_DB": os.environ.get("CC_SWITCH_DB", str(cc_export) if cc_export.is_file() else ""),
+                       "GW_STATS": os.environ.get("GW_STATS", str(ROOT / "stats.json")),
+                       "WB_USAGE_SNAPSHOT": str(candidate)}
                 proc = subprocess.run(
-                    ["python3", str(etl)], env=env, capture_output=True, text=True, timeout=300,
+                    [sys.executable, str(etl)], env=env, capture_output=True, text=True, timeout=300,
                 )
                 if proc.returncode != 0:
-                    tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
-                    return {"ok": False, "error": "ETL 失败: " + " / ".join(tail)}
-                summary_lines = proc.stdout.strip().splitlines()
-                try:
-                    summary = json.loads(summary_lines[-1]) if summary_lines else {}
-                except ValueError:
-                    summary = {}
-                snap = self.usage_snapshot()
-                return {
-                    "ok": True,
-                    "summary": summary,
-                    "snapshot": snap,
-                    "snapshotError": snap.get("hint") if not snap.get("available") else None,
-                }
-            finally:
-                shutil.rmtree(workdir, ignore_errors=True)
+                    raise ValueError(proc.stderr.strip()[-1000:] or f"ETL 退出码 {proc.returncode}")
+                summary = json.loads(proc.stdout)
+                if not isinstance(summary, dict) or summary.get("snapshot_error") or summary.get("gateway_error"):
+                    raise ValueError("ETL 未成功生成完整快照")
+                payload = self._usage_payload(candidate)
+                count = payload["kpi"].get("requests")
+                if count is None or count != summary.get("total_requests"):
+                    raise ValueError("用量快照与刷新结果不一致")
+                if previous and not self._usage_keeps_history(previous, payload):
+                    return {"ok": False, "error": "新账本缺少已有历史，已保留上次数据。请检查迁移的账本。"}
+                os.replace(candidate, self.usage_path)
+                summary["snapshot_path"] = str(self.usage_path)
+                return {"ok": True, "summary": summary, "snapshot": {"available": True, "payload": payload}}
         except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "ETL 超时（>300s），请稍后在宿主机检查。"}
+            return {"ok": False, "error": "用量刷新超时，请稍后重试。"}
         except (OSError, ValueError) as exc:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            print(f"[usage] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            return {"ok": False, "error": "用量刷新失败。请检查网关统计、可选数据源和数据目录权限。"}
         finally:
             self._usage_lock.release()
 

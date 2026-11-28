@@ -21,12 +21,6 @@ services:
       HOST_WEB_PORT: "${HOST_WEB_PORT:-8080}"
       HOST_BRIDGE_PORT: "${HOST_BRIDGE_PORT:-8318}"
       LOGIN_TIMEOUT: "300"
-      # 「刷新数据」按钮在容器内重跑 ETL: 源库目录只读挂载(WAL 需要 -wal/-shm 可见),
-      # 账本在临时目录用副本, 快照直写 /data/web
-      CC_SWITCH_DB: "/data/ccswitch-ro/cc-switch.db"
-      WB_LEDGER_DB: "/data/ledger/behavior_ledger.db"
-      GW_STATS: "/data/gateway/stats.json"
-      WB_USAGE_SNAPSHOT: "/data/web/usage_snapshot.json"
     ports:
       - "${BIND_IP:-127.0.0.1}:${HOST_WEB_PORT:-8080}:8080"
       - "${BIND_IP:-127.0.0.1}:${HOST_GW_PORT:-8317}:8317"
@@ -34,8 +28,6 @@ services:
     volumes:
       - ./data/gateway:/data/gateway
       - ./data/web:/data/web
-      - ~/.cc-switch:/data/ccswitch-ro:ro
-      - ~/.hermes/behavior_ledger.db:/data/ledger/behavior_ledger.db:ro
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5)"]
       interval: 30s

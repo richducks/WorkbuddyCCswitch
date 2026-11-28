@@ -27,7 +27,7 @@
 
 ## 快速开始
 
-支持 Linux、macOS 和 Windows，三平台运行同一个 Docker 栈（容器内行为完全一致）。宿主机需要：Docker（Linux 用 Docker Engine + compose 插件；macOS / Windows 用 Docker Desktop，Windows 需启用 WSL2 后端）、Git、Python 3.9+，以及 Go 1.26+（构建网关用；无系统 Go 时用 `--go` 或环境变量 `GO` 指定）。Apple Silicon 原生构建 arm64 容器，Intel/AMD 为 amd64。
+本项目以 Docker 部署，不要求先安装 Hermes 或 CC Switch。宿主机需要：Docker（Linux 用 Docker Engine + Compose 插件；macOS / Windows 用 Docker Desktop，Windows 使用 WSL2 后端）、Git、Python 3.9+ 和 Go 1.26+（构建网关用，可用 `--go` 指定路径）。Apple Silicon 构建 arm64 容器，Intel/AMD 64 位机器构建 amd64 容器。
 
 仓库不包含编译后的网关；构建脚本会拉取固定的 WorkBuddy Gateway v1.14.47 源码、校验提交、应用本地补丁（手动签到 + 到期优先调度）并运行签到与调度策略测试。
 
@@ -75,12 +75,12 @@ sudo docker inspect workbuddy-hermes --format '部署目录: {{index .Config.Lab
 确认部署目录是当前目录，且 `data/gateway` 与 `data/web` 分别挂载到 `/data/gateway` 和 `/data/web`；目录不一致时先切到实际部署目录，不要用另一套空数据重建。如果网关补丁有更新，先运行 `python3 scripts/build_gateway.py`。备份本地数据后，重建并验证：
 
 ```bash
-sudo docker compose up -d --build --wait workbuddy-hermes &&
-sudo docker compose exec -T workbuddy-hermes \
-  grep -n 'account-title-height' /app/app/static/index.html
+sudo docker compose stop workbuddy-hermes &&
+bash scripts/backup-current.sh &&
+sudo docker compose up -d --build --wait workbuddy-hermes
 ```
 
-如果本机的 `docker ps` 不需要 sudo，可以省略 sudo。无需放宽 Docker socket 权限。重建后刷新原控制台地址并检查账号池向上、向下滚动时标题保持可见。
+如果本机的 `docker ps` 不需要 sudo，可以省略 sudo。重建后打开原控制台，核对已有账号和用量数据。`docker compose down` 会停止并移除容器，保留宿主机 `data/`；卸载前先确认备份，数据目录可单独保留。
 
 
 **可信局域网直接访问（可选，优先用 SSH 隧道）**：在 `.env` 中将 `BIND_IP` 改为 Docker 宿主机的具体私有 IPv4 地址，再运行 `docker compose up -d --build`。不支持 `0.0.0.0` 或公网地址。三个端口按配置发布到同一个地址：
@@ -147,6 +147,19 @@ ssh -NT -o ExitOnForwardFailure=yes \
 | Hermes 对接 | 显示 `base_url`、默认模型、脱敏 API Key；可复制 provider JSON、配置命令和完整 Key |
 | 模型目录 | 自动从网关 `/v1/models` 读取全部模型（含上下文/输出上限）；复制的 provider JSON 已含全量模型；新增模型后可一键复制刷新命令同步到宿主机 Hermes |
 | 用量桥 | 显示 CC Switch 应填写的 Base URL；用量刷新只读，不触发签到 |
+| 用量复盘 | 按日期、模型和时段统计请求；网关点数与可选 CC Switch 美元用量分开显示。管理员可刷新，其他有查看权限的账号只读。 |
+
+### 用量数据与旧账本迁移
+
+默认直接从网关统计读取用量。点击「用量复盘」→「刷新数据」把请求增量写入私有的 `data/web/usage_ledger.db`，成功后才替换容器专用快照 `data/web/usage_console_snapshot.json`。
+
+如要同时统计 CC Switch，请用 SQLite 的「在线备份」功能把源库导出到 `data/web/cc-switch-export.db`，然后在控制台刷新。导出只需 SQLite 文件，不必挂载整个用户目录；不要直接复制正在使用的 WAL 模式数据库。例如在项目根目录（已安装 `sqlite3` 时）：
+
+```bash
+sqlite3 -readonly "$HOME/.cc-switch/cc-switch.db" '.backup data/web/cc-switch-export.db'
+```
+
+已有旧版用量历史时，停止容器、备份后，将原账本（若使用默认配置，为 `~/.hermes/behavior_ledger.db`）用同样的 `.backup` 导出为 `data/web/usage_ledger.db`，再启动并刷新。容器在首次成功刷新前显示旧快照 `data/web/usage_snapshot.json`，之后只显示自己的快照。宿主机定时任务可继续写旧快照，无需改配置，不会覆盖控制台数据。
 
 ## 备份与迁移
 
@@ -155,8 +168,12 @@ ssh -NT -o ExitOnForwardFailure=yes \
 恢复备份时请复制为独立文件，不要创建指向备份的硬链接。容器启动会调整已恢复的目录和单链接普通文件的属主，不会跟随符号链接或更改多链接文件的属主。
 
 ```bash
-bash scripts/backup-current.sh      # 本机私有备份，不上传 Git
+docker compose stop workbuddy-hermes
+bash scripts/backup-current.sh      # 私有备份，退出非零时不可用于恢复
+# 进入打印的备份目录，执行 sha256sum -c SHA256SUMS（macOS: shasum -a 256 -c SHA256SUMS）。
 ```
+
+恢复时保持实例停止，将备份的 `docker-gateway/`、`docker-web/` 分别复制到部署目录的 `data/gateway/`、`data/web/`。如需恢复端口和绑定设置，可从备份中的 `stack.env` 恢复 `.env`；再运行 `docker compose up -d --wait`。
 
 `scripts/rollback.sh` 仅适用于原本就运行了旧版 systemd 网关和用量桥的机器，不是新安装的通用回滚方式。
 
@@ -200,6 +217,7 @@ python3 -B scripts/test_providers.py    # 自定义提供商持久化、校验�
 python3 -B scripts/test_console.py      # 守护退避、缓存并发、登录会话与日志修剪
 python3 -B scripts/test_permissions.py  # 先在虚拟环境安装 requirements-permissions.txt
 python3 -B scripts/test_inference_probe.py # 流式结束、错误帧及模型匹配
+python3 -B scripts/test_usage_etl.py       # 空部署、WAL 源库、幂等与损坏数据保留
 docker compose config --quiet
 docker compose ps
 curl -i http://127.0.0.1:8080/api/summary  # 默认端口，未认证应返回 401
@@ -222,7 +240,7 @@ python3 skill/scripts/deploy_workbuddy_ccswitch.py verify --dir . --inference-mo
 ## 安全约定
 
 - 数据卷 `0700`，凭据/状态/token 文件 `0600`；进程降权运行。
-- 网页 Basic Auth + 同源校验；API Key 只在 `/api/hermes/key` 返回给已认证会话，页面上默认脱敏。
+- 网页使用密码会话、角色权限和 CSRF 校验；完整 API Key 只返回给具备密钥权限的用户，页面默认脱敏。
 - 网页不展示 UID、昵称或原始网关日志。新的登录二维码和备用链接只保存在当前会话内存中，不写入登录日志；会话结束后清除。
 - 宿主机默认仅发布到 `127.0.0.1`。仅在明确需要、且网络可信时启用上述私有地址绑定；跨公网或不可信网络请保留回环设置并使用 SSH 隧道。
 - 只接入本人或明确获授权的微信账号。
@@ -247,7 +265,7 @@ app/boot.py             启动编排（网关守护重启、启动时日志修�
 app/controller.py       账号/登录会话/标签/Hermes 信息
 app/checkin.py          状态快照与手动签到资格判定
 app/usage_bridge.py     CC Switch 只读用量桥
-app/web.py              网页与 API
+app/permissions.py      网页会话、权限与 API
 app/static/index.html   配置网页
 scripts/                跨平台网关构建、离线自测、备份、回滚、模型列表刷新
 ```

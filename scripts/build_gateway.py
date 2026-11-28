@@ -79,22 +79,21 @@ def main() -> None:
         test_env = os.environ.copy()
         test_env.update({"GOTOOLCHAIN": "local", "CGO_ENABLED": "0"})
         print("Running check-in, scheduling and inference resilience tests")
-        sh([str(go_cmd), "test", "-run", r"Checkin|CheckIn|ExpireFirst|EarliestQuotaEnd|ChatStreamRetry|StreamResilien|StreamTimeout|IdleReadCloser|NetworkError|UpstreamRetries|RateLimit|Reserve|Pin|StreamChat.*Tool", "."], cwd=src, env=test_env)
+        sh([str(go_cmd), "test", "-run", r"Checkin|CheckIn|ExpireFirst|EarliestQuotaEnd|ChatStreamRetry|StreamResilien|StreamTimeout|IdleReadCloser|NetworkError|UpstreamRetries|RateLimit|Reserve|Pin|StreamChat.*Tool|ResolvedModel", "."], cwd=src, env=test_env)
 
         build_env = os.environ.copy()
         build_env.update({"GOTOOLCHAIN": "local", "CGO_ENABLED": "0",
                           "GOOS": "linux", "GOARCH": target_arch})
         out_dir = root / "bin"
         out_dir.mkdir(exist_ok=True)
-        candidate = out_dir / ".manual-gateway-tmp"
         print(f"Building linux/{target_arch} gateway binary")
-        sh([str(go_cmd), "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w",
-            "-o", str(candidate), "."], cwd=src, env=build_env)
-        candidate.chmod(0o755)
         final = out_dir / "workbuddy-gateway-manual"
-        if final.exists():
-            final.unlink()
-        candidate.replace(final)
+        with tempfile.TemporaryDirectory(prefix=".gateway-", dir=out_dir) as work:
+            candidate = Path(work) / final.name
+            sh([str(go_cmd), "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w",
+                "-o", str(candidate), "."], cwd=src, env=build_env)
+            candidate.chmod(0o755)
+            candidate.replace(final)
         print(f"OK: {final} (linux/{target_arch})")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

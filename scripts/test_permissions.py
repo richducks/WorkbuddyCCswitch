@@ -138,6 +138,15 @@ class PermissionsTests(unittest.TestCase):
                                     headers={"X-CSRFToken": csrf})
         self.assertEqual(response.status_code, 403)
         self.controller.set_account_auto_checkin.assert_not_called()
+        self.controller.usage_snapshot.return_value = {"available": False, "hint": "missing"}
+        self.assertFalse(result.json["permissions"]["usage_refresh"])
+        self.assertEqual(self.client.get("/api/usage").status_code, 200)
+        response = self.client.post("/api/usage/refresh", json={}, headers={"X-CSRFToken": csrf})
+        self.assertEqual(response.status_code, 403)
+        self.controller.usage_refresh.assert_not_called()
+        self.assertEqual(self.change_password("fixture-reader", "AnotherReader123").status_code, 302)
+        with self.assertRaisesRegex(RuntimeError, "修改初始密码"):
+            self.build(bind_ip="192.168.1.2")
         with self.app.app_context():
             sm = self.app.appbuilder.sm
             role = sm.find_role("WorkBuddy Read Only")
