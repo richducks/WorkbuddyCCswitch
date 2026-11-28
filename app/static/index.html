@@ -369,17 +369,20 @@
       <div id="usageBody" hidden>
         <div class="usage-kpis" id="usageKpis"></div>
         <div class="usage-block"><h3>每日成本与请求量</h3>
-          <div class="usage-sub">柱 = 成本（左轴） · 线 = 请求次数（右轴） · 虚线 = 成本 7 日均线 · 末日浅色柱因源库同步滞后可能不完整</div>
-          <div class="usage-chart" id="chDaily"></div></div>
+          <div class="usage-sub">上带 = WorkBuddy 链成本（$）柱 + 虚线 7 日均线 + 橙线请求次数（右轴） · 下带 = 网关链用量（点数）柱 · 末日浅色柱因源库同步滞后可能不完整</div>
+          <div class="usage-chart" id="chDaily"></div>
+          <div class="usage-chart" id="chDailyG"></div></div>
         <div class="usage-block"><h3>每日成本按模型构成</h3>
           <div class="usage-sub" id="modelSub"></div>
           <div class="usage-legend" id="modelLegend"></div>
-          <div class="usage-chart" id="chModel"></div></div>
+          <div class="usage-chart" id="chModel"></div>
+          <div class="usage-chart" id="chModelG"></div></div>
         <div class="usage-block"><h3>时段分布（全程汇总）</h3>
-          <div class="usage-sub">柱 = 成本（左轴） · 线 = 请求次数（右轴） — 看一天里什么时段最烧钱</div>
-          <div class="usage-chart" id="chHour"></div></div>
+          <div class="usage-sub">上带 = WorkBuddy 链成本（$）+ 橙线请求次数（右轴） · 下带 = 网关链用量（点数）— 看一天里什么时段最烧</div>
+          <div class="usage-chart" id="chHour"></div>
+          <div class="usage-chart" id="chHourG"></div></div>
         <div class="usage-block"><h3>星期 × 时段热力图</h3>
-          <div class="usage-sub">颜色 = 成本热度 · 悬停看金额与次数</div>
+          <div class="usage-sub">颜色 = 请求次数热度（两链合计） · 悬停看次数与两种成本</div>
           <div class="usage-chart" id="chHeat"></div></div>
         <div class="usage-block"><h3>缓存命中率（按天）</h3>
           <div class="usage-sub">缓存读 tokens ÷（缓存读 + 未缓存输入） — 越高越省，掉下去通常是长间隔后冷启动</div>
