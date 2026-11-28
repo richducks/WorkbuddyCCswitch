@@ -1,0 +1,176 @@
+diff --git a/main.go b/main.go
+index b4f86fe..7312c74 100644
+--- a/main.go
++++ b/main.go
+@@ -3919,6 +3919,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
+ 		var usage map[string]any
+ 		var output completionOutput
+ 		finishReason := ""
++		respModel := ""
+ 		sawDone := false
+ 		commentLines, metadataLines := 0, 0
+ 		// 每个通道的还原缓存都属于本次尝试；重放时从干净状态重新累积。
+@@ -3961,6 +3962,9 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
+ 				if u, ok := chunk["usage"].(map[string]any); ok {
+ 					usage = u
+ 				}
++				if m, ok := chunk["model"].(string); ok && m != "" {
++					respModel = m
++				}
+ 				finishReason = noteFinishReason(finishReason, chunk)
+ 			}
+ 			if output.emptyLimit(finishReason) {
+@@ -3977,6 +3981,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
+ 			}
+ 		}
+ 		scanErr := scanner.Err()
++		statsObserveResolvedModel(r, respModel)
+ 		// 只有确认上游正常完成时才补发剩余尾部；中断或缺少 finish_reason
+ 		// 时保持残缺语义，不能把尾部伪造成完整回复。
+ 		if restorePlan.active() && scanErr == nil && finishReason != "" {
+@@ -4134,6 +4139,7 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
+ 	}
+ 	completionJSON = restoreChatCompletionIdentity(r, completionJSON)
+ 	usage := usageFromCompletion(completionJSON)
++	statsObserveResolvedModel(r, statsResolvedModelFromCompletion(completionJSON))
+ 	output, finish := completionOutputFromJSON(completionJSON)
+ 	statsObserveUsage(r, usage, finish != "length")
+ 	logOutputBudget(r, reqID, modelName, finish, output, usage)
+@@ -4672,6 +4678,7 @@ func aggregateCompletion(r io.Reader, model string, requests ...*http.Request) (
+ 	}
+ 	if err := scanner.Err(); err != nil {
+ 		if len(requests) > 0 {
++			statsObserveResolvedModel(requests[0], respModel)
+ 			statsObserveUsage(requests[0], usage, false)
+ 		}
+ 		return nil, fmt.Errorf("读取上游流失败: %w", err)
+diff --git a/messages.go b/messages.go
+index 9a7ea02..9e588b1 100644
+--- a/messages.go
++++ b/messages.go
+@@ -1014,6 +1014,7 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
+ 	body := newTTFTReader(resp.Body, startTime)
+ 	defer finishFirstToken(r, modelName, reqID, body)
+ 	scanErr := scanUpstreamSSE(body, state, writeEvent, r)
++	statsObserveResolvedModel(r, state.model)
+ 	statsObserveUsage(r, state.usage, scanErr == nil && state.finish != "" && state.finish != "length")
+ 	if scanErr != nil {
+ 		if errors.Is(scanErr, errUpstreamAccountRestricted) {
+@@ -1082,7 +1083,9 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
+ 	state := newRestoringAnthropicStreamState(modelName, wantThinking, identityRestoreFor(r))
+ 	body := newTTFTReader(resp.Body, startTime)
+ 	defer finishFirstToken(r, modelName, reqID, body)
+-	if err := scanUpstreamSSE(body, state, nil, r); err != nil {
++	err := scanUpstreamSSE(body, state, nil, r)
++	statsObserveResolvedModel(r, state.model)
++	if err != nil {
+ 		if errors.Is(err, errUpstreamAccountRestricted) {
+ 			markAccountRestricted(r, acc, reqID, modelName)
+ 			statsObserveUsage(r, state.usage, false)
+diff --git a/responses.go b/responses.go
+index cebf603..0fdfed8 100644
+--- a/responses.go
++++ b/responses.go
+@@ -610,6 +610,7 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
+ 		return
+ 	}
+ 	usage := usageFromCompletion(completionJSON)
++	statsObserveResolvedModel(r, statsResolvedModelFromCompletion(completionJSON))
+ 	progress, finish := completionOutputFromJSON(completionJSON)
+ 	statsObserveUsage(r, usage, finish != "length")
+ 	logOutputBudget(r, reqID, modelName, finish, progress, usage)
+@@ -958,6 +959,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
+ 	body := newTTFTReader(resp.Body, startTime)
+ 	defer finishFirstToken(r, modelName, reqID, body)
+ 	scanner := newUpstreamSSEScanner(body, r)
++	var respModel string
+ 	for scanner.Scan() {
+ 		data := stripDataPrefix(scanner.Text())
+ 		if data == "" {
+@@ -976,6 +978,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
+ 		if u, ok := chunk["usage"].(map[string]any); ok {
+ 			usage = u
+ 		}
++		if m, ok := chunk["model"].(string); ok && m != "" {
++			respModel = m
++		}
+ 		finishReason = noteFinishReason(finishReason, chunk)
+ 		choices, _ := chunk["choices"].([]any)
+ 		for _, c := range choices {
+@@ -1086,6 +1091,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
+ 		}
+ 	}
+ 	scanErr := scanner.Err()
++	statsObserveResolvedModel(r, respModel)
+ 	completeTokenStream(body, scanErr == nil && finishReason != "")
+ 	statsObserveUsage(r, usage, scanErr == nil && finishReason != "" && finishReason != "length")
+ 	if scanErr != nil {
+diff --git a/stats.go b/stats.go
+index 3c2cb75..9c5fd7c 100644
+--- a/stats.go
++++ b/stats.go
+@@ -34,6 +34,7 @@ type statsAccount struct {
+ type statsRequest struct {
+ 	Account      string   `json:"account"`
+ 	Model        string   `json:"model"`
++	ResolvedModel string  `json:"resolvedModel,omitempty"`
+ 	At           int64    `json:"at"` // 完成时间，Unix 毫秒，按该时刻归桶
+ 	Status       int      `json:"status"`
+ 	Complete     bool     `json:"complete"`
+@@ -284,6 +285,7 @@ type statsAttempt struct {
+ 	id       string
+ 	account  statsAccount
+ 	model    string
++	resolved string
+ 	started  time.Time
+ 	usage    map[string]any
+ 	ttft     *float64
+@@ -315,6 +317,24 @@ func statsObserveUsage(r *http.Request, usage map[string]any, complete bool) {
+ 	}
+ }
+ 
++	// statsObserveResolvedModel 记录上游响应实际返回的模型名（auto 分流场景用于区分真实解析结果）。
++func statsObserveResolvedModel(r *http.Request, model string) {
++	if p := statsAttemptFor(r); p != nil && model != "" {
++		p.resolved = normalizeModelName(model)
++	}
++}
++
++// statsResolvedModelFromCompletion 从聚合完成的 JSON 里取上游声明的模型名。
++func statsResolvedModelFromCompletion(data []byte) string {
++	var completion struct {
++		Model string `json:"model"`
++	}
++	if json.Unmarshal(data, &completion) != nil {
++		return ""
++	}
++	return completion.Model
++}
++
+ func statsTokenValue(usage map[string]any, field string) *int64 {
+ 	if value, ok := usageNumber(usage, field); ok && value >= 0 {
+ 		return &value
+@@ -351,7 +371,7 @@ func statsFinishAttempt(r *http.Request, status int) {
+ 	if p == nil || p.id == "" {
+ 		return
+ 	}
+-	row := statsRequest{Account: p.id, Model: p.model, At: time.Now().UnixMilli(), Status: status,
++	row := statsRequest{Account: p.id, Model: p.model, ResolvedModel: p.resolved, At: time.Now().UnixMilli(), Status: status,
+ 		Complete: p.complete && status < 400, LatencyMS: durationMilliseconds(time.Since(p.started)), TTFTMS: p.ttft, TTFTMetric: ttftMetric,
+ 		InputTokens: statsTokenValue(p.usage, "prompt_tokens"), OutputTokens: statsTokenValue(p.usage, "completion_tokens"),
+ 		CachedTokens: statsCachedValue(p.usage)}
+@@ -376,8 +396,12 @@ func statsFinishAttempt(r *http.Request, status int) {
+ 	requestStats.document.Requests = append(requestStats.document.Requests, row)
+ 	requestStats.revision++
+ 	requestStats.Unlock()
+-	log.Printf("[请求统计] traceId=%s 账号=%s 模型=%s 状态=%d 完整=%t 有Token=%t 有积分=%t 总耗时ms=%.2f TTFT口径=%s 有首Token=%t 说明=只记录实测usage，不记录正文；文件写入由后台执行",
+-		debugTraceID(r), p.account.File, p.model, row.Status, row.Complete, row.TotalTokens != nil, row.Credit != nil, row.LatencyMS, row.TTFTMetric, row.TTFTMS != nil)
++	resolvedLog := p.resolved
++	if resolvedLog == "" {
++		resolvedLog = "-"
++	}
++	log.Printf("[请求统计] traceId=%s 账号=%s 模型=%s 解析模型=%s 状态=%d 完整=%t 有Token=%t 有积分=%t 总耗时ms=%.2f TTFT口径=%s 有首Token=%t 说明=只记录实测usage，不记录正文；文件写入由后台执行",
++		debugTraceID(r), p.account.File, p.model, resolvedLog, row.Status, row.Complete, row.TotalTokens != nil, row.Credit != nil, row.LatencyMS, row.TTFTMetric, row.TTFTMS != nil)
+ 	*p = statsAttempt{}
+ }
+ 
