@@ -177,6 +177,17 @@ class PermissionsTests(unittest.TestCase):
         self.assertFalse(summary.json["permissions"]["initialPassword"])
         self.assertNotIn("wb-initial-banner", client.get("/").text)
 
+    def test_usage_endpoint_is_registered_and_session_gated(self):
+        # /api/usage 必须注册在 PERMISSIONS，否则只读角色访问会 404（历史上 /api/pins 踩过这个坑）。
+        self.controller.usage_snapshot.return_value = {"available": False, "hint": "missing"}
+        self.assertEqual(self.client.get("/api/usage").status_code, 401)
+        self.assertEqual(self.controller.usage_snapshot.call_count, 0)
+        self.login("admin", "123456")
+        response = self.client.get("/api/usage")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"available": False, "hint": "missing"})
+        self.assertEqual(self.controller.usage_snapshot.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

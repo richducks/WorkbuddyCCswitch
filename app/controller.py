@@ -201,6 +201,7 @@ class Controller:
         self._pins_lock = threading.Lock()
         self.pins_path = ROOT / "pins.json"
         self.provider_registry = ProviderRegistry(WEB_DATA / "providers.json")
+        self.usage_path = WEB_DATA / "usage_snapshot.json"
         self._catalog: list[dict] = []
         self._catalog_refresh_at = 0.0
         self._catalog_fetching = False
@@ -375,6 +376,23 @@ class Controller:
             "bridgePort": HOST_BRIDGE_PORT,
             "bridgeUrl": f"http://{HOST_BIND_IP}:{HOST_BRIDGE_PORT}",
         }
+
+    # ---------- usage dashboard ----------
+    def usage_snapshot(self) -> dict:
+        """「用量复盘」数据源：宿主机每日 ETL 写入的聚合快照（只读 JSON）。
+
+        快照缺失或损坏时优雅降级为提示文案，控制台其余功能不受影响。"""
+        try:
+            data = json.loads(private_read(self.usage_path))
+        except (OSError, ValueError):
+            return {
+                "available": False,
+                "hint": "尚未生成用量快照。在宿主机执行 python3 ~/.hermes/scripts/usage_charts.py "
+                        "--json <仓库>/data/web/usage_snapshot.json，之后每日 03:00 ETL 会自动刷新。",
+            }
+        if not isinstance(data, dict) or not isinstance(data.get("kpi"), dict) or not isinstance(data.get("days"), list):
+            return {"available": False, "hint": "用量快照格式不正确，请在宿主机重新生成。"}
+        return {"available": True, "payload": data}
 
     # ---------- accounts ----------
     def next_filename(self) -> str:

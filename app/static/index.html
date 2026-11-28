@@ -116,6 +116,20 @@
   .json-fold pre { margin-top: 10px; max-height: 320px; overflow: auto; }
   .empty { color: var(--muted); text-align: center; padding: 22px; }
   .loading { opacity: .5; pointer-events: none; }
+  /* 用量复盘模块 */
+  .usage-kpis { display: flex; gap: 10px; flex-wrap: wrap; }
+  .usage-kpi { flex: 1 1 130px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+  .usage-kpi .v { font-size: 20px; font-weight: 600; }
+  .usage-kpi .k { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .usage-block { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px 8px; margin-top: 14px; }
+  .usage-block h3 { margin: 0; font-size: 13.5px; font-weight: 600; }
+  .usage-sub { font-size: 11px; color: var(--muted); margin: 2px 0 6px; }
+  .usage-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin: 2px 0 4px; }
+  .usage-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .usage-chart svg { display: block; width: 100%; }
+  #usageTip { position: fixed; display: none; z-index: 70; pointer-events: none; background: var(--panel-2);
+              border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px;
+              color: var(--fg); box-shadow: 0 2px 10px rgba(0,0,0,.35); max-width: 260px; }
   .provider-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 12px; margin-top: 12px; }
   .provider-form[hidden] { display: none; }
   .provider-form label { display: grid; gap: 4px; align-content: start; color: var(--muted); font-size: 12px; }
@@ -178,6 +192,13 @@
     .account-table td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 12px; }
     .account-table .quota { white-space: normal; }
   }
+  #qrCanvasWrap canvas {
+    display: block;
+    margin: 4px auto;
+    background: #fff;
+    max-width: 100%;
+    height: auto;
+  }
 </style>
 </head>
 <body>
@@ -199,6 +220,7 @@
     <div class="nav-group">
       <div class="nav-title">用量与状态</div>
       <a href="#bridgeCard">用量桥 / CC Switch</a>
+      <a href="#usageCard">用量复盘</a>
       <a href="#setupGuideCard">配置说明</a>
     </div>
   </nav>
@@ -339,6 +361,32 @@
         查询脚本：<code>GET {{baseUrl}}/usage</code>，提取器返回 <code>response.entries</code>。
         用量刷新只读，不会触发签到。
       </div>
+    </section>
+    <section class="card wide" id="usageCard" hidden>
+      <h2>用量复盘 <span class="n" id="usageMeta"></span>
+        <button class="sm" id="usageRefreshBtn" hidden>刷新数据</button></h2>
+      <p class="hint" id="usageUnavailable" hidden></p>
+      <div id="usageBody" hidden>
+        <div class="usage-kpis" id="usageKpis"></div>
+        <div class="usage-block"><h3>每日成本与请求量</h3>
+          <div class="usage-sub">柱 = 成本（左轴） · 线 = 请求次数（右轴） · 虚线 = 成本 7 日均线 · 末日浅色柱因源库同步滞后可能不完整</div>
+          <div class="usage-chart" id="chDaily"></div></div>
+        <div class="usage-block"><h3>每日成本按模型构成</h3>
+          <div class="usage-sub" id="modelSub"></div>
+          <div class="usage-legend" id="modelLegend"></div>
+          <div class="usage-chart" id="chModel"></div></div>
+        <div class="usage-block"><h3>时段分布（全程汇总）</h3>
+          <div class="usage-sub">柱 = 成本（左轴） · 线 = 请求次数（右轴） — 看一天里什么时段最烧钱</div>
+          <div class="usage-chart" id="chHour"></div></div>
+        <div class="usage-block"><h3>星期 × 时段热力图</h3>
+          <div class="usage-sub">颜色 = 成本热度 · 悬停看金额与次数</div>
+          <div class="usage-chart" id="chHeat"></div></div>
+        <div class="usage-block"><h3>缓存命中率（按天）</h3>
+          <div class="usage-sub">缓存读 tokens ÷（缓存读 + 未缓存输入） — 越高越省，掉下去通常是长间隔后冷启动</div>
+          <div class="usage-chart" id="chCache"></div></div>
+        <p class="hint" id="usageFootnote"></p>
+      </div>
+      <div id="usageTip"></div>
     </section>
     <section class="card wide setup-guide" id="setupGuideCard" hidden>
       <h2>服务端与客户端配置说明</h2>
@@ -871,13 +919,106 @@ function resetLoginArea(checkinOnly) {
   $('#startLoginBtn').onclick = () => startLogin(checkinOnly);
 }
 
+/* QR-CANVAS-RENDER-BEGIN */
+// 终端二维码字符画转 canvas 渲染:上游 CLI 用 skip2/go-qrcode ToSmallString(false) 输出半块
+// 字符(█▀▄),字符墨水=白模块、空格=黑模块(已用真实输出+解码器验证)。浏览器等宽字体的
+// 宽高比各机不同,<pre> 直出会错位导致扫不出来;解析回模块矩阵后用 canvas 绘制,与字体无关。
+function extractQrMatrix(output) {
+  if (!output) return null;
+  const isQrLine = (s) => s.length >= 25 && /^[\u2588\u2580\u2584 ]+$/.test(s);
+  let best = null;
+  let run = [];
+  const flush = () => {
+    if (run.length && (!best || run.length > best.length)) best = run.slice();
+    run = [];
+  };
+  for (const ln of output.split('\n')) {
+    if (isQrLine(ln)) run.push(ln);
+    else flush();
+  }
+  flush();
+  if (!best || best.length < 5) return null;
+  const n = best[0].length;
+  // QR 边长恒为奇数(4v+17),行数=(n+1)/2,每行编码上下两个模块
+  if (best.some((l) => l.length !== n) || 2 * best.length !== n + 1) return null;
+  const white = [];
+  for (const ln of best) {
+    const top = [];
+    const bot = [];
+    for (const ch of ln) {
+      // '█'=上下白 '▀'=上白下黑 '▄'=上黑下白 ' '=全黑
+      top.push(ch === '\u2588' || ch === '\u2580');
+      bot.push(ch === '\u2588' || ch === '\u2584');
+    }
+    white.push(top, bot);
+  }
+  return white; // white.length=n+1(奇数末行只有上半),绘制时只取前 n 行
+}
+
+let qrBoxLastRaw = null;
+function renderQrBox(raw) {
+  const pre = $('#qrBox');
+  if (!pre) return;
+  if (raw === qrBoxLastRaw) return;
+  qrBoxLastRaw = raw;
+  const wrap = $('#qrCanvasWrap');
+  const white = extractQrMatrix(raw);
+  if (!white || !wrap) {
+    pre.textContent = raw;
+    if (wrap) wrap.style.display = 'none';
+    return;
+  }
+  const n = white[0].length;
+  const cell = Math.max(3, Math.floor(460 / n));
+  const dpr = window.devicePixelRatio || 1;
+  let canvas = wrap.firstElementChild;
+  if (!canvas || canvas._cell !== cell || canvas._dpr !== dpr) {
+    canvas = document.createElement('canvas');
+    canvas._cell = cell;
+    canvas._dpr = dpr;
+    wrap.replaceChildren(canvas);
+  }
+  canvas.width = Math.round(n * cell * dpr);
+  canvas.height = Math.round(n * cell * dpr);
+  canvas.style.width = `${n * cell}px`;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    pre.textContent = raw;
+    wrap.style.display = 'none';
+    return;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, n * cell, n * cell);
+  ctx.fillStyle = '#000';
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (!white[y][x]) ctx.fillRect(x * cell, y * cell, cell, cell);
+    }
+  }
+  wrap.style.display = 'block';
+  // <pre> 保留登录日志,字符二维码本体已由 canvas 渲染,替换为一行说明
+  const lines = raw.split('\n');
+  const idx = [];
+  lines.forEach((s, i) => {
+    if (s.length >= 25 && /^[\u2588\u2580\u2584 ]+$/.test(s)) idx.push(i);
+  });
+  if (idx.length) {
+    lines.splice(idx[0], idx[idx.length - 1] - idx[0] + 1, '（二维码已渲染为上方图片）');
+    pre.textContent = lines.join('\n');
+  }
+}
+/* QR-CANVAS-RENDER-END */
+
 function showLoginProgress(sid, file, generation, checkinOnly, activeCheckinOnly = checkinOnly) {
   setLoginTitle(activeCheckinOnly);
   clearTimeout(pollTimer);
   $('#loginArea').innerHTML = `<div class="steps"><span class="step-num">1</span>用<b>目标微信号</b>扫描下方二维码</div>
+    <div id="qrCanvasWrap" style="display:none"></div>
     <pre id="qrBox">正在生成二维码…</pre>
     <div class="steps" style="margin-top:8px"><span class="step-num">2</span>如无法扫码，打开：<a id="loginLink" href="#" target="_blank" rel="noopener noreferrer">—</a></div>
     <div class="bar"><button id="cancelLoginBtn" class="danger">取消</button><span class="spacer"></span><span class="file" id="loginFile">${esc(file)}</span></div>`;
+  qrBoxLastRaw = null;
   const cancel = $('#cancelLoginBtn');
   cancel.onclick = async () => {
     cancel.disabled = true;
@@ -896,14 +1037,14 @@ function showLoginProgress(sid, file, generation, checkinOnly, activeCheckinOnly
         load();
         return;
       }
-      $('#qrBox').textContent = v.output || (cancel.disabled ? '正在取消…' : '正在生成二维码…');
+      renderQrBox(v.output || (cancel.disabled ? '正在取消…' : '正在生成二维码…'));
       const link = $('#loginLink');
       link.href = v.loginUrl || '#';
       link.textContent = v.loginUrl || '—';
       pollTimer = setTimeout(poll, 1500);
     } catch (e) {
       if (generation !== loginGeneration) return;
-      $('#qrBox').textContent = '登录状态查询失败，请关闭后重新打开。';
+      renderQrBox('登录状态查询失败，请关闭后重新打开。');
       toast(e.message, true);
     }
   };
@@ -983,6 +1124,7 @@ if (navLinks.length) activateTab(navLinks[0]);
 load();
 setInterval(load, 15000);
 </script>
+<script src="/usage.js"></script>
 <script src="/providers.js"></script>
 </body>
 </html>

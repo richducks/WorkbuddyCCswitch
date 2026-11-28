@@ -7,6 +7,8 @@ def dispatch_console_api(c: Controller, method: str, path: str, query: dict, dat
     if method == "GET":
         if path == "/api/summary":
             return 200, c.status()
+        if path == "/api/usage":
+            return 200, c.usage_snapshot()
         if path == "/api/session":
             sid = query.get("id", [""])[0]
             return 200, c.get_session(sid)

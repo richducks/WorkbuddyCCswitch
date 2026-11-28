@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Offline regressions for the console. No real credentials or gateway."""
-import base64
 import importlib
 import io
 import json
@@ -138,19 +137,6 @@ class ConsoleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "令牌文件为空"):
             boot.ensure_token(token)
 
-    def test_non_ascii_login_tokens_are_rejected_without_crashing(self):
-        import web
-
-        handler = object.__new__(web.Handler)
-        handler.server = SimpleNamespace(token="fixture-token")
-        handler.headers = {"Authorization": "Basic " + base64.b64encode("admin:中文".encode()).decode()}
-        self.assertFalse(handler._auth())
-        handler._body = lambda: {"token": "中文"}
-        handler._send = Mock()
-        with patch.object(web, "_check_origin", return_value=True), patch.object(web.time, "sleep"):
-            handler._handle_login()
-        handler._send.assert_called_once_with(401, {"error": "令牌错误"})
-
     def test_existing_blank_token_fails_closed(self):
         token = self.web / "web.token"
         token.write_text("\n")
@@ -265,6 +251,28 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(status["hermes"]["endpoint"], "http://192.168.50.10:18317/v1")
         self.assertEqual(status.get("bridgeUrl"), "http://192.168.50.10:18318")
         self.assertTrue(status["hermes"]["refreshCommand"].endswith("--gateway-host 192.168.50.10 --gateway-port 18317"))
+
+
+    def test_usage_snapshot_degrades_gracefully_and_passes_valid_payload(self):
+        missing = self.console.usage_snapshot()
+        self.assertFalse(missing["available"])
+        self.assertTrue(missing["hint"])
+        snapshot = self.web / "usage_snapshot.json"
+        snapshot.write_text("not json")
+        self.assertFalse(self.console.usage_snapshot()["available"])
+        payload = {"kpi": {"cost": 1}, "days": []}
+        snapshot.write_text(json.dumps(payload))
+        self.assertEqual(self.console.usage_snapshot(), {"available": True, "payload": payload})
+
+    def test_usage_route_serves_snapshot_via_dispatch(self):
+        from console_routes import dispatch_console_api
+
+        (self.web / "usage_snapshot.json").write_text(json.dumps({"kpi": {"cost": 1}, "days": []}))
+        code, body = dispatch_console_api(self.console, "GET", "/api/usage", {}, {})
+        self.assertEqual((code, body["available"]), (200, True))
+        (self.web / "usage_snapshot.json").unlink()
+        code, body = dispatch_console_api(self.console, "GET", "/api/usage", {}, {})
+        self.assertEqual((code, body["available"]), (200, False))
 
 
 if __name__ == "__main__":

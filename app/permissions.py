@@ -38,6 +38,7 @@ INITIAL_PASSWORD_BANNER = (
 )
 PERMISSIONS = {
     ("GET", "summary"): "status",
+    ("GET", "usage"): "status",
     ("GET", "session"): "accounts",
     ("GET", "hermes/key"): "keys",
     ("GET", "providers"): "providers",
@@ -233,6 +234,13 @@ def build_permissions_app(controller: Controller, web_data: Path, *, bootstrap_p
     def provider_script():
         return (
             (STATIC / "providers.js").read_text(encoding="utf-8"), 200,
+            {"Content-Type": "text/javascript; charset=utf-8"},
+        )
+
+    @app.get("/usage.js")
+    def usage_script():
+        return (
+            (STATIC / "usage.js").read_text(encoding="utf-8"), 200,
             {"Content-Type": "text/javascript; charset=utf-8"},
         )
 
