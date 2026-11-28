@@ -39,6 +39,7 @@ INITIAL_PASSWORD_BANNER = (
 PERMISSIONS = {
     ("GET", "summary"): "status",
     ("GET", "usage"): "status",
+    ("POST", "usage/refresh"): "status",
     ("GET", "session"): "accounts",
     ("GET", "hermes/key"): "keys",
     ("GET", "providers"): "providers",

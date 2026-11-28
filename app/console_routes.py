@@ -57,6 +57,8 @@ def dispatch_console_api(c: Controller, method: str, path: str, query: dict, dat
                 raise ValueError("置顶参数必须为布尔值")
             c.set_pin(str(data.get("file", "")), pinned)
             return 200, {"ok": True}
+        if path == "/api/usage/refresh":
+            return 200, c.usage_refresh()
         if path == "/api/checkin/manual":
             name = data.get("file")
             if not isinstance(name, str):

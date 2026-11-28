@@ -274,6 +274,109 @@ class ConsoleTests(unittest.TestCase):
         code, body = dispatch_console_api(self.console, "GET", "/api/usage", {}, {})
         self.assertEqual((code, body["available"]), (200, False))
 
+    def _fake_etl_env(self, **extra):
+        etl = self.root / "etl.py"
+        ledger = self.root / "ledger.db"
+        etl.write_text("# fixture ETL\n")
+        ledger.write_bytes(b"SQLite format 3\0")
+        env = {"WB_ETL_SCRIPT": str(etl), "WB_LEDGER_DB": str(ledger),
+               "CC_SWITCH_DB": str(self.root / "src.db"), **extra}
+        return patch.dict(ctrl.os.environ, env)
+
+    def test_usage_refresh_runs_container_etl_and_serves_new_snapshot(self):
+        etl = self.root / "etl.py"
+
+        def fake_run(argv, env=None, **kwargs):
+            env = env or {}
+            self.assertEqual(argv[0], "python3")
+            self.assertEqual(argv[1], str(etl))
+            # 只读源库经 os.environ 透传；账本指到临时副本；快照写到挂载目录
+            self.assertEqual(env.get("CC_SWITCH_DB"), "src.db")
+            self.assertNotEqual(env.get("BEHAVIOR_LEDGER_DB"), str(self.root / "ledger.db"))
+            self.assertTrue(env.get("BEHAVIOR_LEDGER_DB", "").startswith("/tmp/usage-etl-"))
+            self.assertEqual(env.get("WB_USAGE_SNAPSHOT"), str(self.web / "usage_snapshot.json"))
+            (self.web / "usage_snapshot.json").write_text(
+                json.dumps({"kpi": {"cost": 9}, "days": [{"day": "2026-11-28"}]})
+            )
+            return SimpleNamespace(returncode=0, stdout='{"new_rows": 12, "gateway_new_rows": 34, "total_requests": 99}\n', stderr="")
+
+        with self._fake_etl_env(CC_SWITCH_DB="src.db"), patch.object(
+            ctrl.subprocess, "run", side_effect=fake_run
+        ):
+            result = self.console.usage_refresh()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["new_rows"], 12)
+        self.assertEqual(result["summary"]["gateway_new_rows"], 34)
+        self.assertEqual(result["snapshot"]["payload"]["kpi"]["cost"], 9)
+        self.assertFalse(self.console._usage_lock.locked())
+
+    def test_usage_refresh_failure_keeps_old_snapshot_and_reports_error(self):
+        (self.web / "usage_snapshot.json").write_text(json.dumps({"kpi": {"cost": 1}, "days": []}))
+        fail = SimpleNamespace(returncode=1, stdout="", stderr="boom\ntraceback line\n")
+        with self._fake_etl_env(), patch.object(ctrl.subprocess, "run", return_value=fail):
+            result = self.console.usage_refresh()
+        self.assertFalse(result["ok"])
+        self.assertIn("ETL", result["error"])
+        self.assertIn("traceback line", result["error"])
+        # 旧快照仍可用，前端能继续展示上一次数据
+        self.assertEqual(self.console.usage_snapshot()["payload"]["kpi"]["cost"], 1)
+
+    def test_usage_refresh_is_serialized_by_lock(self):
+        release = threading.Event()
+
+        def blocked_run(argv, env=None, **kwargs):
+            self.assertTrue(release.wait(timeout=5))
+            return SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+
+        with self._fake_etl_env(), patch.object(ctrl.subprocess, "run", side_effect=blocked_run):
+            first = threading.Thread(target=self.console.usage_refresh)
+            first.start()
+            # 等线程真正拿到锁,避免竞争窗口里循环调用也执行了 ETL
+            for _ in range(200):
+                if self.console._usage_lock.locked():
+                    break
+                time.sleep(0.01)
+            self.assertTrue(self.console._usage_lock.locked())
+            second = self.console.usage_refresh()
+            release.set()
+        first.join(timeout=5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.get("ok", True))
+        self.assertIn("已有一次刷新", second["error"])
+        self.assertFalse(self.console._usage_lock.locked())
+
+    def test_usage_refresh_route_dispatches_to_controller(self):
+        from console_routes import dispatch_console_api
+
+        with patch.object(self.console, "usage_refresh", return_value={"ok": True, "summary": {}}) as ref:
+            code, body = dispatch_console_api(self.console, "POST", "/api/usage/refresh", {}, {})
+        self.assertEqual((code, body["ok"]), (200, True))
+        ref.assert_called_once_with()
+
+    def test_usage_refresh_is_reachable_through_permissions(self):
+        # 防回归:缺这行时网关层直接 404「接口不存在」(2026-11-28 实际踩坑)
+        # permissions.py 依赖 flask(宿主机离线无),用 AST 直接读 PERMISSIONS 字典键
+        import ast
+        src = (Path(__file__).resolve().parents[1] / "app" / "permissions.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        keys = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "PERMISSIONS" for t in node.targets
+            ):
+                if isinstance(node.value, ast.Dict):
+                    keys = [
+                        (
+                            (k.elts[0].value, k.elts[1].value),
+                            v.value if isinstance(v, ast.Constant) else None,
+                        )
+                        for k, v in zip(node.value.keys, node.value.values)
+                        if isinstance(k, ast.Tuple)
+                    ]
+        perm = dict(keys)
+        self.assertIn(("POST", "usage/refresh"), perm)
+        self.assertEqual(perm[("POST", "usage/refresh")], "status")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

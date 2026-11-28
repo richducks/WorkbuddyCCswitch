@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import stat
 import subprocess
 import threading
@@ -194,6 +195,7 @@ class Controller:
         self.sessions: dict[str, LoginSession] = {}
         self._sessions_lock = threading.RLock()
         self._login_lock = threading.Lock()
+        self._usage_lock = threading.Lock()  # 序列化「刷新数据」触发的容器内 ETL
         self._labels_lock = threading.Lock()
         self.labels_path = WEB_DATA / "labels.json"
         self._reserves_lock = threading.Lock()
@@ -387,12 +389,64 @@ class Controller:
         except (OSError, ValueError):
             return {
                 "available": False,
-                "hint": "尚未生成用量快照。在宿主机执行 python3 ~/.hermes/scripts/usage_charts.py "
-                        "--json <仓库>/data/web/usage_snapshot.json，之后每日 03:00 ETL 会自动刷新。",
+                "hint": "尚未生成用量快照。点右上角「刷新数据」可在容器内立即生成（需已挂载源库）；"
+                        "或在宿主机执行 python3 scripts/usage_etl/usage_charts.py --json <仓库>/data/web/usage_snapshot.json，"
+                        "之后每日 03:00 ETL 会自动刷新。",
             }
         if not isinstance(data, dict) or not isinstance(data.get("kpi"), dict) or not isinstance(data.get("days"), list):
             return {"available": False, "hint": "用量快照格式不正确，请在宿主机重新生成。"}
         return {"available": True, "payload": data}
+
+    def usage_refresh(self) -> dict:
+        """点「刷新数据」时在容器内重跑 ETL，把两条链的新流水汇入并重写快照。
+
+        数据流: 只读源库(容器挂载) + 账本副本(临时目录, 只增汇) + stats.json →
+        快照原子写回 /data/web/usage_snapshot.json (bind mount 直达宿主机)。
+        账本正本仍由宿主机每日 03:00 ETL 维护，本方法不写宿主机账本。
+        失败时返回 ok:false 并保留旧快照，控制台继续显示上一份数据。"""
+        etl = Path(os.environ.get("WB_ETL_SCRIPT", "/app/usage_etl/etl_behavior_ledger.py"))
+        ledger = Path(os.environ.get("WB_LEDGER_DB", "/data/ledger/behavior_ledger.db"))
+        snapshot = Path(os.environ.get("WB_USAGE_SNAPSHOT", str(WEB_DATA / "usage_snapshot.json")))
+        if not etl.is_file():
+            return {"ok": False, "error": f"ETL 脚本不存在: {etl}"}
+        if not ledger.is_file():
+            return {"ok": False, "error": f"账本库不可读: {ledger}"}
+        if not self._usage_lock.acquire(blocking=False):
+            return {"ok": False, "error": "已有一次刷新正在进行，请稍候再试。"}
+        try:
+            workdir = Path(f"/tmp/usage-etl-{secrets.token_hex(4)}")
+            workdir.mkdir(parents=True)
+            try:
+                ledger_copy = workdir / ledger.name
+                shutil.copyfile(ledger, ledger_copy)
+                env = {**os.environ, "BEHAVIOR_LEDGER_DB": str(ledger_copy),
+                       "WB_USAGE_SNAPSHOT": str(snapshot)}
+                proc = subprocess.run(
+                    ["python3", str(etl)], env=env, capture_output=True, text=True, timeout=300,
+                )
+                if proc.returncode != 0:
+                    tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
+                    return {"ok": False, "error": "ETL 失败: " + " / ".join(tail)}
+                summary_lines = proc.stdout.strip().splitlines()
+                try:
+                    summary = json.loads(summary_lines[-1]) if summary_lines else {}
+                except ValueError:
+                    summary = {}
+                snap = self.usage_snapshot()
+                return {
+                    "ok": True,
+                    "summary": summary,
+                    "snapshot": snap,
+                    "snapshotError": snap.get("hint") if not snap.get("available") else None,
+                }
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "ETL 超时（>300s），请稍后在宿主机检查。"}
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            self._usage_lock.release()
 
     # ---------- accounts ----------
     def next_filename(self) -> str:

@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir -r /app/requirements-permissions.txt
 COPY bin/workbuddy-gateway-manual /app/bin/workbuddy-gateway
 COPY config/config.json.example /app/config/config.json.example
 COPY app/ /app/app/
+COPY scripts/usage_etl/ /app/usage_etl/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod 755 /app/bin/workbuddy-gateway /usr/local/bin/docker-entrypoint.sh \
